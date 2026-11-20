@@ -12,6 +12,11 @@
 - **Licence:** MIT, private for now. Only permissive dependencies (MIT, Apache, BSD,
   zlib, ISC, OFL fonts). No GPL code, no Autodesk FBX SDK.
 - **Must-have export:** Godot 4. Unity and Unreal are nice to have.
+- **The bar for every feature:** Umber should feel like magic. It does the right thing
+  without being asked, keeps the person's work safe through every operation, never lets the
+  machinery show (no seam lines, hitches, jargon or settings in the way), and says what
+  happened in plain words. A feature is done when it feels like it just worked, not when it
+  works.
 
 ## Stack
 
