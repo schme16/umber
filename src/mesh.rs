@@ -390,7 +390,7 @@ fn compute_normals(verts: &mut [Vertex], indices: &[u32]) {
 
 /// Per-vertex tangents from UV derivatives, accumulated per triangle and made orthogonal to
 /// the normal. Close to MikkTSpace on ordinary meshes; export will want the real thing.
-fn compute_tangents(verts: &mut [Vertex], indices: &[u32]) {
+pub(crate) fn compute_tangents(verts: &mut [Vertex], indices: &[u32]) {
     let mut tan = vec![Vec3::ZERO; verts.len()];
     let mut bit = vec![Vec3::ZERO; verts.len()];
     for tri in indices.chunks_exact(3) {

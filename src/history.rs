@@ -5,13 +5,17 @@
 //! to pixels, kept as tile snapshots. Undoing a step swaps it with the current state, and the
 //! swapped-out state becomes the redo step.
 //!
+//! A third kind, an unwrap or repack, swaps the whole mesh and every set's stack (the old
+//! stacks still hold the paint in the old layout).
+//!
 //! Stack changes are found rather than reported: once no pointer button is held, any
 //! difference from the last recorded stack becomes one step. A slider drag is one step, not
 //! one per frame, and no panel code has to remember to call the history.
 
 use eframe::egui_wgpu::wgpu;
 
-use crate::texset::{same_stack, Layer, TextureSet, TileSnapshot};
+use crate::mesh::Mesh;
+use crate::texset::{same_stack, Layer, TextureSet, TileSnapshot, SIZE};
 
 /// Oldest steps drop off past this many...
 const LIMIT: usize = 200;
@@ -21,6 +25,33 @@ const PIXEL_BUDGET: u64 = 1536 << 20;
 pub enum Change {
     Stack { set: usize, layers: Vec<Layer>, selected: usize },
     Pixels { set: usize, tiles: TileSnapshot },
+    /// The mesh and, per set, its stack and selection from before.
+    Mesh { mesh: Box<Mesh>, stacks: Vec<(Vec<Layer>, usize)> },
+}
+
+impl Change {
+    /// GPU memory this step keeps alive that nothing else does (roughly).
+    fn bytes(&self) -> u64 {
+        match self {
+            Change::Pixels { tiles, .. } => tiles.bytes(),
+            Change::Stack { .. } => 0,
+            Change::Mesh { stacks, .. } => {
+                let texels = SIZE as u64 * SIZE as u64;
+                let layer = |l: &Layer| {
+                    l.pixels.as_ref().map_or(0, |_| texels * (4 + 8 + 4)) + l.mask.as_ref().map_or(0, |_| texels * 4)
+                };
+                stacks.iter().flat_map(|(layers, _)| layers).map(layer).sum()
+            }
+        }
+    }
+}
+
+/// What an undo or redo touched.
+pub struct Applied {
+    /// The texture set to show.
+    pub set: usize,
+    /// The mesh was swapped, so its GPU buffers and island maps need rebuilding.
+    pub mesh: bool,
 }
 
 #[derive(Default)]
@@ -46,13 +77,9 @@ impl History {
     pub fn push(&mut self, change: Change) {
         self.undo.push(change);
         self.redo.clear();
-        let bytes = |c: &Change| match c {
-            Change::Pixels { tiles, .. } => tiles.bytes(),
-            Change::Stack { .. } => 0,
-        };
-        let mut total: u64 = self.undo.iter().map(bytes).sum();
+        let mut total: u64 = self.undo.iter().map(Change::bytes).sum();
         while self.undo.len() > 1 && (self.undo.len() > LIMIT || total > PIXEL_BUDGET) {
-            total -= bytes(&self.undo.remove(0));
+            total -= self.undo.remove(0).bytes();
         }
     }
 
@@ -68,23 +95,44 @@ impl History {
     }
 
     /// Returns the texture set the step touched, so the caller can show it.
-    pub fn undo(&mut self, sets: &mut [TextureSet], device: &wgpu::Device, queue: &wgpu::Queue) -> Option<usize> {
+    pub fn undo(&mut self, sets: &mut [TextureSet], mesh: &mut Mesh, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Applied> {
         let change = self.undo.pop()?;
-        let (set, back) = apply(change, sets, device, queue);
+        let (applied, back) = apply(change, sets, mesh, device, queue);
         self.redo.push(back);
-        Some(set)
+        Some(applied)
     }
 
-    pub fn redo(&mut self, sets: &mut [TextureSet], device: &wgpu::Device, queue: &wgpu::Queue) -> Option<usize> {
+    pub fn redo(&mut self, sets: &mut [TextureSet], mesh: &mut Mesh, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Applied> {
         let change = self.redo.pop()?;
-        let (set, back) = apply(change, sets, device, queue);
+        let (applied, back) = apply(change, sets, mesh, device, queue);
         self.undo.push(back);
-        Some(set)
+        Some(applied)
     }
 }
 
-fn apply(change: Change, sets: &mut [TextureSet], device: &wgpu::Device, queue: &wgpu::Queue) -> (usize, Change) {
+fn apply(change: Change, sets: &mut [TextureSet], mesh: &mut Mesh, device: &wgpu::Device, queue: &wgpu::Queue) -> (Applied, Change) {
+    let (set, back) = apply_to_sets(change, sets, mesh, device, queue);
+    let swapped = matches!(back, Change::Mesh { .. });
+    (Applied { set, mesh: swapped }, back)
+}
+
+fn apply_to_sets(change: Change, sets: &mut [TextureSet], mesh: &mut Mesh, device: &wgpu::Device, queue: &wgpu::Queue) -> (usize, Change) {
     match change {
+        Change::Mesh { mesh: before, stacks } => {
+            let current_mesh = std::mem::replace(mesh, *before);
+            let current = sets
+                .iter_mut()
+                .zip(stacks)
+                .map(|(s, (layers, selected))| {
+                    let back = (std::mem::replace(&mut s.layers, layers), s.selected);
+                    s.selected = selected.min(s.layers.len().saturating_sub(1));
+                    s.committed = s.layers.clone();
+                    s.dirty = true;
+                    back
+                })
+                .collect();
+            (0, Change::Mesh { mesh: Box::new(current_mesh), stacks: current })
+        }
         Change::Stack { set, layers, selected } => {
             let s = &mut sets[set];
             let current = std::mem::replace(&mut s.layers, layers);

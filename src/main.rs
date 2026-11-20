@@ -10,6 +10,7 @@ mod pen;
 mod renderer;
 mod texset;
 mod theme;
+mod unwrap;
 mod widgets;
 
 fn main() -> eframe::Result {

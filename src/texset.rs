@@ -360,6 +360,8 @@ pub struct Compositor {
     no_padding: wgpu::TextureView,
     islands: wgpu::RenderPipeline,
     jump: wgpu::ComputePipeline,
+    /// Paint transfer to new UVs: 8-bit targets, then float.
+    transfer: [wgpu::RenderPipeline; 2],
 }
 
 impl Compositor {
@@ -442,6 +444,38 @@ impl Compositor {
         });
         let jump = pipeline(&padding, "jump");
 
+        let transfer_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("transfer"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/transfer.wgsl").into()),
+        });
+        let transfer = [COLOR_FORMAT, MAT_FORMAT].map(|format| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("paint transfer"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &transfer_module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: 16,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &transfer_module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        });
+
         let resolve_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("resolve params"),
             size: 16,
@@ -465,6 +499,7 @@ impl Compositor {
             no_padding,
             islands,
             jump,
+            transfer,
         }
     }
 
@@ -655,6 +690,75 @@ impl Compositor {
         let [a, b] = ping;
         set.padding = Some(if cur == 0 { a } else { b });
         set.dirty = true;
+    }
+
+    /// The set's stack with every paint layer's pixels and every mask moved to a new UV
+    /// layout. `uvs` holds, per vertex, the new UV then the old one; `indices` and `ranges`
+    /// pick the set's triangles. Call it before the set's islands are worked out for the new
+    /// layout: it reads the old ones. Fill layers carry over as they are, and the old
+    /// textures are untouched, so the old stack still works for undo.
+    pub fn transfer(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        set: &TextureSet,
+        uvs: &wgpu::Buffer,
+        indices: &wgpu::Buffer,
+        ranges: &[std::ops::Range<u32>],
+    ) -> Vec<Layer> {
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("paint transfer") });
+        let mut copy = |src: &wgpu::Texture, dst: &wgpu::Texture| {
+            let pipeline = &self.transfer[usize::from(src.format() == MAT_FORMAT)];
+            let src_view = src.create_view(&Default::default());
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("transfer source"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: view(&src_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(set.padding.as_ref().unwrap_or(&self.no_padding)) },
+                ],
+            });
+            let dst_view = dst.create_view(&Default::default());
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("paint transfer"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, uvs.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            for r in ranges {
+                pass.draw_indexed(r.clone(), 0, 0..1);
+            }
+        };
+        let moved = set
+            .layers
+            .iter()
+            .map(|layer| {
+                let mut out = layer.clone();
+                if let Some(src) = &layer.pixels {
+                    let dst = PaintPixels::new(device);
+                    for ((s, _), (d, _)) in src.textures().into_iter().zip(dst.textures()) {
+                        copy(s, d);
+                    }
+                    out.pixels = Some(Rc::new(dst));
+                }
+                if let Some(src) = &layer.mask {
+                    let texture = layer_texture(device, "layer mask", MASK_FORMAT, SIZE);
+                    copy(&src.texture, &texture);
+                    out.mask = Some(Rc::new(Mask { view: texture.create_view(&Default::default()), texture }));
+                }
+                out
+            })
+            .collect();
+        queue.submit([enc.finish()]);
+        moved
     }
 
     /// Flatten the set's stack into its maps if anything changed since last time.
@@ -1026,6 +1130,41 @@ pub(crate) mod tests {
 
     fn fill(colour: Color32) -> Fill {
         Fill { colour, rough: 0.25, metal: 1.0, height: 0.5, channels: Channels::ALL }
+    }
+
+    #[test]
+    fn transfer_moves_paint_to_new_uvs() {
+        use wgpu::util::DeviceExt;
+        let (device, queue) = gpu();
+        let comp = Compositor::new(&device, &queue);
+        // Red on the left half, nothing on the right.
+        let layer = Layer::paint(&device, "p");
+        let half: Vec<u8> = (0..SIZE * SIZE).flat_map(|i| if i % SIZE < SIZE / 2 { [255, 0, 0, 255] } else { [0; 4] }).collect();
+        write_full(&queue, &layer.pixels.as_ref().unwrap().color, &half, 4);
+        // A quad that used to sit on the left half and now sits on the right half.
+        let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let pairs: Vec<[f32; 4]> = corners.iter().map(|c| [0.5 + c[0] * 0.5, c[1], c[0] * 0.5, c[1]]).collect();
+        let uvs = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&pairs),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let fill = Layer::fill("f", fill(Color32::WHITE));
+        let mut set = comp.new_set(&device, &queue, &mesh::Material::named("t"));
+        set.layers = vec![fill.clone(), layer.clone()];
+        let moved = comp.transfer(&device, &queue, &set, &uvs, &indices, &[0..6]);
+        assert!(moved[0].same(&fill), "fill layers carry over as they are");
+        let color = &moved[1].pixels.as_ref().unwrap().color;
+        assert_eq!(read_texel(&device, &queue, color, SIZE * 3 / 4, SIZE / 2, 4), vec![255, 0, 0, 255]);
+        assert_eq!(read_texel(&device, &queue, color, SIZE / 4, SIZE / 2, 4), vec![0; 4]);
+        // The old layer still holds the old layout, for undo.
+        let old = &layer.pixels.as_ref().unwrap().color;
+        assert_eq!(read_texel(&device, &queue, old, SIZE / 4, SIZE / 2, 4), vec![255, 0, 0, 255]);
     }
 
     #[test]

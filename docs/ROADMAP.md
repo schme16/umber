@@ -72,8 +72,14 @@ with the pen, see it lit, export to Godot.
    those are saved, and the history drops its oldest steps past 1.5 GB. Maps are padded past
    UV island edges (a jump flood finds each texel's nearest island texel), so filtering
    doesn't show seam lines. A stroke paints the material it starts on.
-5. **Auto-unwrap.** xatlas for models without UVs, plus the UV health readout
-   (stretch, overlaps, space used, texel density).
+5. **Auto-unwrap.** Done. xatlas unwraps each material into its own UV square on a worker
+   thread (with progress and Cancel); a model that opens without UVs offers it straight away,
+   and painting one says why it can't. Repack keeps every island's shape and lays them out
+   again. Either way the paint moves with the layout (each texel of the new layout copies
+   its old position, through the old padding map so seams don't show), and the whole change
+   is one undo step. The UV workspace shows UV health per material: a coverage map with
+   overlaps in red, texture used, overlap, stretch, texel density, area outside 0 to 1,
+   islands, and a sentence on what to do about anything that's off.
 6. **Export.** GLB with embedded PBR maps, plus a Godot `.tres` StandardMaterial3D
    pointing at ORM-packed PNGs. FBX import via ufbx.
 

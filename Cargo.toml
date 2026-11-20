@@ -17,6 +17,7 @@ log = "0.4.35"
 rfd = "0.18.0"
 tobj = "4"
 x11rb = { version = "0.13", features = ["xinput"] }
+xatlas-rs-v2 = "0.1.4"
 
 [dev-dependencies]
 pollster = "1.0.3"
@@ -25,3 +26,8 @@ pollster = "1.0.3"
 # model with big textures doesn't take seconds while working on Umber itself.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The published wrapper panics on any repack (charts of a UV mesh have no type). Fixed copy,
+# MIT like the original; vendor/xatlas-rs-v2/UMBER-CHANGES.md says what changed.
+[patch.crates-io]
+xatlas-rs-v2 = { path = "vendor/xatlas-rs-v2" }

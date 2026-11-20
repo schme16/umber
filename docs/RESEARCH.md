@@ -32,7 +32,7 @@ What was looked into while starting Umber (2026-11-20), and what it means for th
 | tobj | 4.0 | MIT | OBJ import |
 | image | 0.25 | MIT/Apache | PNG/JPEG decode |
 | rfd | 0.18 | MIT | Native file dialogs |
-| xatlas-rs | 0.1 (planned) | MIT | Auto-unwrap and packing |
+| xatlas-rs-v2 | 0.1.4 (vendored, patched) | MIT | Auto-unwrap and repacking; `vendor/xatlas-rs-v2/UMBER-CHANGES.md` says what changed |
 | ufbx | 0.11 (planned) | MIT bindings around MIT/public-domain C | FBX import |
 | egui_dock | 0.21 (maybe) | MIT | Docking, if ever needed |
 

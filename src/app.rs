@@ -2,19 +2,25 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use eframe::egui_wgpu;
+use eframe::egui_wgpu::wgpu::util::DeviceExt;
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
 
 use crate::brush::{self, BrushEngine, Dab};
 use crate::camera::OrbitCamera;
-use crate::history::{Change, History};
+use crate::history::{Applied, Change, History};
 use crate::mesh::{self, Mesh};
 use crate::pen::{PenInput, PressureCurve};
 use crate::renderer::{FrameParams, ViewMode, ViewportRenderer};
 use crate::texset::{self, BlendMode, Channels, Compositor, Fill, Layer, LayerKind, Mask, TextureSet};
 use crate::theme::{self, *};
+use crate::unwrap::{self, Health};
 use crate::{icons, widgets};
+
+/// Overlapping texels on the UV coverage map, and numbers worth a second look.
+const WARN: Color32 = Color32::from_rgb(0xe0, 0x7d, 0x62);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Workspace {
@@ -155,6 +161,15 @@ struct StrokeState {
     pressure: f32,
 }
 
+/// An unwrap or repack running on a worker thread.
+struct UnwrapJob {
+    mode: unwrap::Mode,
+    progress: unwrap::Progress,
+    result: mpsc::Receiver<anyhow::Result<unwrap::Unwrapped>>,
+    /// The mesh it started from; the result is dropped if the mesh changed since.
+    generation: u64,
+}
+
 enum LayerAction {
     Up,
     Down,
@@ -190,6 +205,13 @@ pub struct UmberApp {
     /// The set the layers panel shows and the brush paints.
     active_set: usize,
     history: History,
+    /// Bumped whenever the mesh is replaced (open, unwrap, or undoing one).
+    mesh_generation: u64,
+    unwrap_job: Option<UnwrapJob>,
+    /// UV health of one set, with its coverage map, worked out when the UV panel shows it.
+    uv_health: Option<(usize, Health, egui::TextureHandle)>,
+    /// "Not now" on the offer to unwrap a model that has no UVs.
+    no_uv_offer_dismissed: bool,
 
     view_mode: ViewMode,
     light_yaw: f32,
@@ -227,6 +249,10 @@ impl UmberApp {
             sets: Vec::new(),
             active_set: 0,
             history: History::default(),
+            mesh_generation: 0,
+            unwrap_job: None,
+            uv_health: None,
+            no_uv_offer_dismissed: false,
             view_mode: ViewMode::Lit,
             light_yaw: 0.8,
             exposure: 1.0,
@@ -241,36 +267,123 @@ impl UmberApp {
         if self.stroke.take().is_some() {
             self.brush_engine.end(&self.rs.device, &self.rs.queue);
         }
+        if let Some(job) = self.unwrap_job.take() {
+            job.progress.cancel();
+        }
         let (device, queue) = (&self.rs.device, &self.rs.queue);
         self.sets = mesh.materials.iter().map(|m| self.compositor.new_set(device, queue, m)).collect();
         self.active_set = 0;
         self.history.clear();
-        self.islands = None;
-        self.renderer.set_mesh(&self.rs, &mesh, &self.sets);
-        for (i, set) in self.sets.iter_mut().enumerate() {
-            if let Some(draw) = self.renderer.mesh_draw(i) {
-                self.compositor.set_islands(device, queue, set, draw.vertices, draw.indices, &draw.ranges);
-            }
-        }
         let (center, radius) = mesh.bounding_sphere();
         self.camera = OrbitCamera::default();
         self.camera.frame(center, radius);
         if !mesh.has_uvs {
             self.view_mode = ViewMode::UvCheck;
         }
+        self.no_uv_offer_dismissed = false;
         self.mesh = Some(mesh);
+        self.mesh_to_gpu();
+    }
+
+    /// Upload the current mesh and work out each set's UV islands again.
+    fn mesh_to_gpu(&mut self) {
+        let Some(mesh) = &self.mesh else { return };
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        self.renderer.set_mesh(&self.rs, mesh, &self.sets);
+        for (i, set) in self.sets.iter_mut().enumerate() {
+            if let Some(draw) = self.renderer.mesh_draw(i) {
+                self.compositor.set_islands(device, queue, set, draw.vertices, draw.indices, &draw.ranges);
+            }
+        }
+        self.islands = None;
+        self.uv_health = None;
+        self.mesh_generation += 1;
+    }
+
+    // ---------------------------------------------------------------- unwrap
+
+    fn start_unwrap(&mut self, mode: unwrap::Mode) {
+        if self.unwrap_job.is_some() {
+            return;
+        }
+        let Some(mesh) = self.mesh.clone() else { return };
+        self.end_stroke();
+        let progress = unwrap::Progress::default();
+        let (send, result) = mpsc::channel();
+        let worker = progress.clone();
+        std::thread::spawn(move || {
+            let _ = send.send(unwrap::run(&mesh, mode, &worker));
+        });
+        self.unwrap_job = Some(UnwrapJob { mode, progress, result, generation: self.mesh_generation });
+    }
+
+    fn poll_unwrap(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.unwrap_job else { return };
+        let outcome = match job.result.try_recv() {
+            Ok(outcome) => outcome,
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("The unwrap stopped unexpectedly")),
+        };
+        let job = self.unwrap_job.take().expect("checked above");
+        match outcome {
+            Ok(done) if job.generation == self.mesh_generation => self.apply_unwrap(done, job.mode),
+            Ok(_) => {}
+            Err(_) if job.progress.is_cancelled() => {}
+            Err(e) => {
+                log::error!("{e:#}");
+                self.toast = Some((format!("{e:#}"), self.now));
+            }
+        }
+    }
+
+    /// Swap in the new layout, carry every layer's paint over to it, and make the whole
+    /// thing one undo step.
+    fn apply_unwrap(&mut self, done: unwrap::Unwrapped, mode: unwrap::Mode) {
+        self.end_stroke();
+        self.history.record_stack_changes(&mut self.sets);
+        let Some(old) = self.mesh.replace(done.mesh) else { return };
+        let mesh = self.mesh.as_ref().expect("just set");
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        // Paint only moves when it had somewhere to be: without UVs every texel sat at 0,0.
+        let carry = old.has_uvs;
+        self.renderer.set_mesh(&self.rs, mesh, &self.sets);
+        let pairs: Vec<[f32; 4]> =
+            mesh.vertices.iter().zip(&done.old_uv).map(|(v, o)| [v.uv[0], v.uv[1], o[0], o[1]]).collect();
+        let uvs = device.create_buffer_init(&egui_wgpu::wgpu::util::BufferInitDescriptor {
+            label: Some("new and old uvs"),
+            contents: bytemuck::cast_slice(&pairs),
+            usage: egui_wgpu::wgpu::BufferUsages::VERTEX,
+        });
+        let mut stacks = Vec::with_capacity(self.sets.len());
+        for (i, set) in self.sets.iter_mut().enumerate() {
+            let moved = match (carry, self.renderer.mesh_draw(i)) {
+                (true, Some(draw)) => self.compositor.transfer(device, queue, set, &uvs, draw.indices, &draw.ranges),
+                _ => set.layers.clone(),
+            };
+            stacks.push((std::mem::replace(&mut set.layers, moved), set.selected));
+            set.committed = set.layers.clone();
+            set.dirty = true;
+        }
+        self.history.push(Change::Mesh { mesh: Box::new(old), stacks });
+        self.mesh_to_gpu();
+        let what = match mode {
+            unwrap::Mode::Unwrap => "Unwrapped",
+            unwrap::Mode::Repack => "Repacked",
+        };
+        let moved = if carry { " Paint moved with it; Ctrl+Z puts it back." } else { "" };
+        self.toast = Some((format!("{what} {}.{moved}", self.mesh.as_ref().map_or("", |m| m.name.as_str())), self.now));
     }
 
     fn open_path(&mut self, path: &Path, now: f64) {
         match mesh::load(path) {
             Ok(mesh) => {
-                let note = if mesh.has_uvs {
-                    format!("Opened {} · {} triangles", mesh.name, fmt_count(mesh.triangle_count()))
-                } else {
-                    format!("{} has no UVs yet. Auto-unwrap arrives in the UV workspace soon.", mesh.name)
-                };
+                // A model without UVs gets the unwrap card instead.
+                let note = mesh.has_uvs.then(|| format!("Opened {} · {} triangles", mesh.name, fmt_count(mesh.triangle_count())));
                 self.set_mesh(mesh);
-                self.toast = Some((note, now));
+                self.toast = note.map(|n| (n, now));
             }
             Err(e) => {
                 log::error!("{e:#}");
@@ -344,16 +457,24 @@ impl UmberApp {
     fn undo(&mut self) {
         self.end_stroke();
         self.history.record_stack_changes(&mut self.sets);
-        if let Some(set) = self.history.undo(&mut self.sets, &self.rs.device, &self.rs.queue) {
-            self.active_set = set;
-        }
+        let Some(mesh) = self.mesh.as_mut() else { return };
+        let applied = self.history.undo(&mut self.sets, mesh, &self.rs.device, &self.rs.queue);
+        self.after_history(applied);
     }
 
     fn redo(&mut self) {
         self.end_stroke();
         self.history.record_stack_changes(&mut self.sets);
-        if let Some(set) = self.history.redo(&mut self.sets, &self.rs.device, &self.rs.queue) {
-            self.active_set = set;
+        let Some(mesh) = self.mesh.as_mut() else { return };
+        let applied = self.history.redo(&mut self.sets, mesh, &self.rs.device, &self.rs.queue);
+        self.after_history(applied);
+    }
+
+    fn after_history(&mut self, applied: Option<Applied>) {
+        match applied {
+            Some(Applied { mesh: true, .. }) => self.mesh_to_gpu(),
+            Some(Applied { set, .. }) => self.active_set = set,
+            None => {}
         }
     }
 
@@ -450,7 +571,11 @@ impl UmberApp {
             self.end_stroke();
         }
         let cam = brush::View { view_proj: proj * view, eye: self.camera.eye(), size };
-        if in_paint && pressed && !alt && response.hovered() && self.stroke.is_none() {
+        let has_uvs = self.mesh.as_ref().is_some_and(|m| m.has_uvs);
+        if in_paint && pressed && !alt && response.hovered() && self.stroke.is_none() && !has_uvs {
+            self.no_uv_offer_dismissed = false;
+            self.toast = Some(("This model has no UVs yet, so there's nowhere for paint to go. Auto-unwrap it first.".into(), self.now));
+        } else if in_paint && pressed && !alt && response.hovered() && self.stroke.is_none() {
             if let Some(origin) = origin {
                 match self.tool {
                     t if t.strokes() => {
@@ -1212,6 +1337,185 @@ impl UmberApp {
         }
     }
 
+    // ---------------------------------------------------------------- UV workspace
+
+    /// UV health of the active material, and the buttons that fix what it finds.
+    fn uv_panel(&mut self, ctx: &egui::Context, vp: Rect) {
+        let width = 320.0;
+        let pos = egui::pos2(vp.right() - 16.0 - width, vp.top() + 16.0);
+        egui::Area::new(egui::Id::unique("uv panel")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+            theme::panel_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
+                ui.set_width(width - 26.0);
+                ui.label(egui::RichText::new("UV health").font(theme::semibold(14.0)));
+                let Some(mesh) = &self.mesh else {
+                    ui.label(egui::RichText::new("Open a model to check its UVs.").color(TEXT_3));
+                    return;
+                };
+                let set = self.active_set.min(self.sets.len().saturating_sub(1));
+                if self.sets.len() > 1 {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                        for (i, s) in self.sets.iter().enumerate() {
+                            let mut on = i == set;
+                            if widgets::chip(ui, &s.name, &mut on).clicked() {
+                                self.active_set = i;
+                            }
+                        }
+                    });
+                } else {
+                    let name = self.sets.first().map_or("", |s| s.name.as_str());
+                    ui.label(egui::RichText::new(format!("{name} · {} px", texset::SIZE)).color(TEXT_3).size(12.0));
+                }
+                ui.add_space(8.0);
+
+                if self.uv_health.as_ref().is_none_or(|(s, ..)| *s != set) {
+                    let health = unwrap::health(mesh, set);
+                    let texture = ctx.load_texture("uv coverage", coverage_image(&health), egui::TextureOptions::NEAREST);
+                    self.uv_health = Some((set, health, texture));
+                }
+                let (_, health, texture) = self.uv_health.as_ref().expect("just filled");
+
+                // The layout itself: islands in brass, overlaps in red.
+                let side = ui.available_width();
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), Sense::hover());
+                let p = ui.painter();
+                p.rect_filled(rect, CornerRadius::same(6), SEG_BG);
+                for k in 1..4 {
+                    let t = k as f32 / 4.0;
+                    let line = Stroke::new(1.0, PANEL_LINE);
+                    p.vline(rect.left() + rect.width() * t, rect.y_range(), line);
+                    p.hline(rect.x_range(), rect.top() + rect.height() * t, line);
+                }
+                p.image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+                p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, PANEL_LINE), egui::StrokeKind::Inside);
+                ui.add_space(8.0);
+
+                let none_or = |v: f32, cut: f32| if v < cut { "none".to_owned() } else { pct(v) };
+                let rows: [(&str, String, bool, &str); 6] = [
+                    ("Texture used", pct(health.used), health.used < 0.3 && !health.unusable(), "Share of the texture square the islands cover"),
+                    ("Overlap", none_or(health.overlap, 0.0005), health.overlap >= 0.005, "Texels more than one part of the model shares: paint there lands in both places"),
+                    (
+                        "Stretch",
+                        if health.stretch < 1.01 { "none".into() } else { format!("{:.0}%", (health.stretch - 1.0) * 100.0) },
+                        health.stretch > 1.25,
+                        "How much a round dab gets squashed on average, by surface area",
+                    ),
+                    (
+                        "Texel density",
+                        format!("{} px/m", fmt_count(health.density.round() as usize)),
+                        health.density_spread > 2.0,
+                        "Texels per metre (per model unit) at the texture size",
+                    ),
+                    ("Outside 0–1", none_or(health.outside, 0.001), health.outside >= 0.001, "UV area past the edge of the texture, where it repeats"),
+                    ("Islands", fmt_count(health.islands), false, "Separate pieces of the layout"),
+                ];
+                for (label, value, warn, tip) in rows {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(label).color(TEXT_2)).on_hover_text(tip);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(egui::RichText::new(value).font(theme::mono(12.0)).color(if warn { WARN } else { TEXT }));
+                        });
+                    });
+                }
+                panel_divider(ui);
+                for line in uv_advice(health) {
+                    ui.label(egui::RichText::new(line).color(TEXT_2));
+                    ui.add_space(2.0);
+                }
+                ui.add_space(8.0);
+
+                let busy = self.unwrap_job.is_some();
+                let unusable = health.unusable() || !mesh.has_uvs;
+                let mut start = None;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let unwrap_tip = if busy { "Already working on it" } else { "Cut new seams and lay the model out from scratch" };
+                    let resp = ui.add_enabled_ui(!busy, |ui| widgets::button(ui, "Auto-unwrap", unusable, 36.0)).inner;
+                    if resp.on_hover_text(unwrap_tip).on_disabled_hover_text(unwrap_tip).clicked() {
+                        start = Some(unwrap::Mode::Unwrap);
+                    }
+                    let repack_tip = if unusable {
+                        "Needs UVs to repack. Auto-unwrap makes them."
+                    } else if busy {
+                        "Already working on it"
+                    } else {
+                        "Keep every island's shape and lay them out tighter"
+                    };
+                    let resp = ui.add_enabled_ui(!busy && !unusable, |ui| widgets::button(ui, "Repack", !unusable && health.used < 0.3, 36.0)).inner;
+                    if resp.on_hover_text(repack_tip).on_disabled_hover_text(repack_tip).clicked() {
+                        start = Some(unwrap::Mode::Repack);
+                    }
+                });
+                ui.add_space(6.0);
+                hint(ui, "Paint moves to the new layout with either, and Ctrl+Z undoes it. Seams, pins and straightening come later.");
+                if let Some(mode) = start {
+                    self.start_unwrap(mode);
+                }
+            });
+        });
+    }
+
+    /// The offer to unwrap a model that arrived without UVs, and progress while one runs.
+    fn unwrap_card(&mut self, ctx: &egui::Context, vp: Rect) {
+        let Some(mesh) = &self.mesh else { return };
+        let job = self.unwrap_job.as_ref().map(|j| (j.mode, j.progress.clone()));
+        if job.is_none() && (mesh.has_uvs || self.no_uv_offer_dismissed) {
+            return;
+        }
+        let name = mesh.name.clone();
+        egui::Area::new(egui::Id::unique("unwrap card"))
+            .order(Order::Foreground)
+            .pivot(Align2::CENTER_TOP)
+            // Below the brush bar, centred in the free space like the view bar.
+            .fixed_pos(egui::pos2((vp.left() + 92.0 + vp.right() - 352.0) * 0.5, vp.top() + 120.0))
+            .show(ctx, |ui| {
+                theme::panel_frame().inner_margin(Margin::symmetric(18, 14)).show(ui, |ui| {
+                    ui.set_width(380.0);
+                    match job {
+                        Some((mode, progress)) => {
+                            let title = match mode {
+                                unwrap::Mode::Unwrap => "Unwrapping",
+                                unwrap::Mode::Repack => "Repacking",
+                            };
+                            ui.label(egui::RichText::new(format!("{title} {name}…")).font(theme::semibold(14.0)));
+                            ui.add_space(8.0);
+                            let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), Sense::hover());
+                            ui.painter().rect_filled(bar, CornerRadius::same(3), TRACK);
+                            let done = Rect::from_min_size(bar.min, egui::vec2(bar.width() * progress.fraction().clamp(0.02, 1.0), bar.height()));
+                            ui.painter().rect_filled(done, CornerRadius::same(3), ACCENT);
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(pct(progress.fraction())).font(theme::mono(12.0)).color(TEXT_3));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if widgets::button(ui, "Cancel", false, 32.0).clicked() {
+                                        progress.cancel();
+                                    }
+                                });
+                            });
+                        }
+                        None => {
+                            ui.label(egui::RichText::new(format!("{name} has no UVs")).font(theme::semibold(14.0)));
+                            ui.add_space(2.0);
+                            ui.label(
+                                egui::RichText::new("Paint is stored in a texture, so every part of the model needs a place on it. Auto-unwrap lays it out for you.")
+                                    .color(TEXT_2),
+                            );
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                if widgets::button(ui, "Auto-unwrap", true, 36.0).clicked() {
+                                    self.start_unwrap(unwrap::Mode::Unwrap);
+                                }
+                                if widgets::button(ui, "Not now", false, 36.0).clicked() {
+                                    self.no_uv_offer_dismissed = true;
+                                }
+                            });
+                        }
+                    }
+                });
+            });
+    }
+
     fn view_bar(&mut self, ctx: &egui::Context, vp: Rect) {
         // Centre in the space left free between the tool rail and the layers panel.
         let free_center_x = (vp.left() + 92.0 + vp.right() - 352.0) * 0.5;
@@ -1284,16 +1588,12 @@ impl UmberApp {
 
     fn workspace_placard(&mut self, ctx: &egui::Context, vp: Rect) {
         let (title, body) = match self.workspace {
-            Workspace::Uv => (
-                "UV workspace",
-                "The model shows a UV checker here. Auto-unwrap, seams, packing and the UV health checks come next.",
-            ),
             Workspace::Materials => ("Material graph", "The node-based PBR editor comes after the paint loop works end to end."),
             Workspace::Export => (
                 "Export",
                 "Godot export (.glb + StandardMaterial3D .tres, ORM-packed maps) is the last step of milestone 1.",
             ),
-            Workspace::Paint => return,
+            Workspace::Paint | Workspace::Uv => return,
         };
         egui::Area::new(egui::Id::unique("placard"))
             .order(Order::Foreground)
@@ -1339,6 +1639,7 @@ impl eframe::App for UmberApp {
         let now = ctx.input(|i| i.time);
         self.now = now;
         self.handle_shortcuts(&ctx, now);
+        self.poll_unwrap(&ctx);
 
         egui::Panel::top("top_bar")
             .exact_size(52.0)
@@ -1355,12 +1656,17 @@ impl eframe::App for UmberApp {
         if self.workspace == Workspace::Paint {
             self.brush_bar(&ctx, vp);
         }
-        self.layers_panel(&ctx, vp);
+        if self.workspace == Workspace::Uv {
+            self.uv_panel(&ctx, vp);
+        } else {
+            self.layers_panel(&ctx, vp);
+        }
         self.view_bar(&ctx, vp);
         if self.mesh.is_none() {
             self.welcome(&ctx, vp, now);
         } else {
             self.workspace_placard(&ctx, vp);
+            self.unwrap_card(&ctx, vp);
         }
         self.toast(&ctx, vp, now);
 
@@ -1412,7 +1718,8 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 }
 
 fn pct(v: f32) -> String {
-    format!("{:.0}%", v * 100.0)
+    // Small shares keep a decimal, so 0.4 % doesn't read as none.
+    if v > 0.0 && v < 0.0995 { format!("{:.1}%", v * 100.0) } else { format!("{:.0}%", v * 100.0) }
 }
 
 fn panel_divider(ui: &mut egui::Ui) {
@@ -1513,6 +1820,51 @@ fn draw_logo_u(p: &egui::Painter, r: Rect) {
     path.extend(pts);
     path.push(egui::pos2(c.x + 5.0, c.y - 6.0));
     p.add(egui::Shape::line(path, Stroke::new(2.2, ON_ACCENT)));
+}
+
+/// The coverage map as an image: islands in brass, overlaps in red, the rest clear.
+fn coverage_image(health: &Health) -> egui::ColorImage {
+    let island = Color32::from_rgba_unmultiplied(0xc9, 0xa0, 0x63, 150);
+    let pixels = health
+        .map
+        .iter()
+        .map(|&c| match c {
+            0 => Color32::TRANSPARENT,
+            1 => island,
+            _ => WARN,
+        })
+        .collect();
+    egui::ColorImage::new([unwrap::MAP, unwrap::MAP], pixels)
+}
+
+/// What the numbers mean, in a sentence each, worst first.
+fn uv_advice(h: &Health) -> Vec<String> {
+    if h.unusable() {
+        return vec!["No usable UVs yet. Auto-unwrap lays the model out so it can be painted.".into()];
+    }
+    let mut out = Vec::new();
+    if h.collapsed > 0 {
+        out.push(format!("{} triangles have no room in the texture, so paint can't land on them.", fmt_count(h.collapsed)));
+    }
+    if h.overlap >= 0.005 {
+        out.push(format!("{} of the layout overlaps, so paint there lands twice. Fine for mirrored parts; otherwise repack.", pct(h.overlap)));
+    }
+    if h.outside >= 0.001 {
+        out.push(format!("{} of the layout sits outside the texture, where it repeats.", pct(h.outside)));
+    }
+    if h.stretch > 1.25 {
+        out.push(format!("Dabs come out squashed on {} of the surface. Auto-unwrap cuts it into flatter pieces.", pct(h.badly_stretched)));
+    }
+    if h.density_spread > 2.0 {
+        out.push(format!("Detail varies {:.1}× across the model, so some parts will look blurrier than others.", h.density_spread));
+    }
+    if h.used < 0.3 {
+        out.push(format!("Only {} of the texture is used. Repack lays the islands out tighter, so paint gets more texels.", pct(h.used)));
+    }
+    if out.is_empty() {
+        out.push("Healthy layout. Nothing needs fixing.".into());
+    }
+    out
 }
 
 fn fmt_count(n: usize) -> String {
