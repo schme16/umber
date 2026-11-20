@@ -1,6 +1,7 @@
-# Writes two OBJ test models into the directory given: knot-no-uvs.obj (a torus knot with no
-# UVs, for Auto-unwrap) and crate-loose-uvs.obj (a box whose faces are bunched into one corner
-# of the UV square, for Repack). Used by scripts/captures/unwrap.sh and repack.sh.
+# Writes three OBJ test models into the directory given: knot-no-uvs.obj (a torus knot with no
+# UVs, for Auto-unwrap), crate-loose-uvs.obj (a box whose faces are bunched into one corner
+# of the UV square, for Repack) and vase-no-uvs.obj (a lathed vase with a flat base and no UVs,
+# for the projections). Used by scripts/captures/unwrap.sh, repack.sh and projections.sh.
 #   python3 scripts/make-test-models.py target/models
 import math, sys
 out = sys.argv[1]
@@ -41,3 +42,21 @@ with open(f"{out}/crate-loose-uvs.obj", "w") as f:
             f.write("vt %f %f\n" % (cell[0] + (su+1)*0.06, cell[1] + (sv+1)*0.06))
         f.write(f"f {vi}/{vi} {vi+1}/{vi+1} {vi+2}/{vi+2}\nf {vi}/{vi} {vi+2}/{vi+2} {vi+3}/{vi+3}\n")
         vi += 4
+# Vase: a lathed profile, closed with a flat base and an open lip, no UVs.
+with open(f"{out}/vase-no-uvs.obj", "w") as f:
+    S, H = 48, 40
+    for i in range(H + 1):
+        y = -1.0 + 2.0 * i / H
+        radius = 0.55 + 0.3 * math.sin((y + 1.0) * 1.6) - 0.25 * max(0.0, y - 0.4) * 2.0
+        for j in range(S):
+            a = 2 * math.pi * j / S
+            f.write("v %f %f %f\n" % (radius * math.cos(a), y, radius * math.sin(a)))
+    f.write("v 0 -1 0\n")
+    centre = (H + 1) * S + 1
+    for i in range(H):
+        for j in range(S):
+            a = i * S + j + 1; b = i * S + (j + 1) % S + 1
+            c = (i + 1) * S + (j + 1) % S + 1; d = (i + 1) * S + j + 1
+            f.write(f"f {a} {d} {c}\nf {a} {c} {b}\n")
+    for j in range(S):
+        f.write(f"f {centre} {j + 1} {(j + 1) % S + 1}\n")

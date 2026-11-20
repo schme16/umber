@@ -15,12 +15,45 @@ use xatlas_rs_v2 as xatlas;
 use crate::mesh::{self, Mesh};
 use crate::texset;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mode {
     /// Cut the mesh into charts from scratch and pack them.
     Unwrap,
+    /// Lay the surface out by projecting it onto a simple shape, then pack the pieces.
+    Project(Projection),
     /// Keep every island's shape and lay them out again, tighter.
     Repack,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Projection {
+    /// Flat, looking down `-dir` with `up` at the top. Faces turned away get their own
+    /// mirrored island, so the back never shares texels with the front.
+    Planar { dir: Vec3, up: Vec3 },
+    /// Each face flat along whichever of the six axis directions it faces most.
+    Box,
+    /// Around `axis`, unrolled; faces looking along the axis become flat caps.
+    Cylinder { axis: Vec3 },
+    /// Longitude and latitude around `axis`.
+    Sphere { axis: Vec3 },
+}
+
+impl Mode {
+    /// What it's doing, for the progress card: "Unwrapping".
+    pub fn doing(self) -> &'static str {
+        match self {
+            Mode::Unwrap | Mode::Project(_) => "Unwrapping",
+            Mode::Repack => "Repacking",
+        }
+    }
+
+    /// What it did, for the toast: "Unwrapped".
+    pub fn done(self) -> &'static str {
+        match self {
+            Mode::Unwrap | Mode::Project(_) => "Unwrapped",
+            Mode::Repack => "Repacked",
+        }
+    }
 }
 
 /// Shared with the worker thread: how far along it is (0 to 1000) and whether to stop.
@@ -121,9 +154,13 @@ fn unwrap_group(mesh: &Mesh, tris: &[usize], mode: Mode, progress: &Progress, sp
             idx.push(l);
         }
     }
+    let mut uvs: Vec<f32> = source.iter().flat_map(|&v| mesh.vertices[v as usize].uv).collect();
+    if let Mode::Project(projection) = mode {
+        // Projected corners split wherever a vertex lands in two places (a seam).
+        (source, idx, uvs) = project(mesh, tris, projection);
+    }
     let pos: Vec<f32> = source.iter().flat_map(|&v| mesh.vertices[v as usize].pos).collect();
     let nrm: Vec<f32> = source.iter().flat_map(|&v| mesh.vertices[v as usize].normal).collect();
-    let uvs: Vec<f32> = source.iter().flat_map(|&v| mesh.vertices[v as usize].uv).collect();
 
     // Declarations must outlive the atlas, which reads them in place.
     let decl = xatlas::MeshDecl {
@@ -142,7 +179,7 @@ fn unwrap_group(mesh: &Mesh, tris: &[usize], mode: Mode, progress: &Progress, sp
     let mut atlas = xatlas::Xatlas::new();
     let added = match mode {
         Mode::Unwrap => atlas.add_mesh(&decl),
-        Mode::Repack => atlas.add_uv_mesh(&uv_decl),
+        Mode::Repack | Mode::Project(_) => atlas.add_uv_mesh(&uv_decl),
     };
     if let Err(e) = added {
         bail!("xatlas couldn't read the mesh ({e:?})");
@@ -198,10 +235,191 @@ fn unwrap_group(mesh: &Mesh, tris: &[usize], mode: Mode, progress: &Progress, sp
     if out.index_array.len() != idx.len() {
         bail!("xatlas dropped some triangles");
     }
+    let mut uv: Vec<Option<[f32; 2]>> =
+        out.vertex_array.iter().map(|v| (v.chart_index >= 0).then(|| [v.uv[0] / scale, v.uv[1] / scale])).collect();
+    // xatlas leaves faces with no UV area out of every chart, and a vertex only they use keeps
+    // its old UV, which can be anywhere. Pin it to a placed corner of one of its faces: the face
+    // had no area to paint before and still has none.
+    loop {
+        let mut changed = false;
+        for tri in out.index_array.chunks_exact(3) {
+            if let Some(placed) = tri.iter().find_map(|&i| uv[i as usize]) {
+                for &i in tri {
+                    if uv[i as usize].is_none() {
+                        uv[i as usize] = Some(placed);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     Ok(Charts {
-        vertices: out.vertex_array.iter().map(|v| (source[v.xref as usize], [v.uv[0] / scale, v.uv[1] / scale])).collect(),
+        vertices: out.vertex_array.iter().zip(uv).map(|(v, uv)| (source[v.xref as usize], uv.unwrap_or_default())).collect(),
         indices: out.index_array.to_vec(),
     })
+}
+
+// ---------------------------------------------------------------- projections
+
+/// Lay `tris` out by `projection`, in model units. Returns, like the compact list in
+/// [`unwrap_group`], the source vertex of each new vertex, three indices per triangle and two
+/// UV floats per vertex. Corners of one source vertex share a new vertex when they land on the
+/// same island at the same spot, so islands stay connected and xatlas packs them whole.
+fn project(mesh: &Mesh, tris: &[usize], projection: Projection) -> (Vec<u32>, Vec<u32>, Vec<f32>) {
+    let pos = |v: u32| Vec3::from(mesh.vertices[v as usize].pos);
+    // Centre of these triangles' bounds: the axis of a cylinder, the middle of a sphere.
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for &t in tris {
+        for &v in &mesh.indices[t * 3..t * 3 + 3] {
+            lo = lo.min(pos(v));
+            hi = hi.max(pos(v));
+        }
+    }
+    let centre = (lo + hi) * 0.5;
+    let axis = match projection {
+        Projection::Cylinder { axis } | Projection::Sphere { axis } => axis.normalize_or(Vec3::Y),
+        _ => Vec3::Y,
+    };
+    let (e1, e2) = frame(axis);
+    // Mean distance from the axis (cylinder) or the centre (sphere): unrolled at that radius,
+    // one unit of the layout is about one unit of surface.
+    let radius = {
+        let (mut sum, mut n) = (0.0f64, 0usize);
+        for &t in tris {
+            for &v in &mesh.indices[t * 3..t * 3 + 3] {
+                let d = pos(v) - centre;
+                let r = match projection {
+                    Projection::Sphere { .. } => d.length(),
+                    _ => (d - axis * d.dot(axis)).length(),
+                };
+                sum += r as f64;
+                n += 1;
+            }
+        }
+        if n > 0 { (sum / n as f64).max(1e-6) as f32 } else { 1.0 }
+    };
+    // Angle around the axis, 0 to 2 pi, counter-clockwise looking down it.
+    let angle = |d: Vec3| d.dot(e2).atan2(d.dot(e1)).rem_euclid(std::f32::consts::TAU);
+
+    // xatlas leaves out faces under a fixed UV area (FLT_EPSILON) when it packs, and then lays
+    // other islands over them. Measured in model units, thin faces on small models fall under
+    // it, so the layout is scaled to about a thousand units across first.
+    let scale = 1000.0 / (hi - lo).length().max(1e-12);
+    // Wider than any island: an unrolled cylinder is pi times the model's width.
+    let apart = 8000.0;
+    let mut weld: HashMap<(u32, u8, [u32; 2]), u32> = HashMap::new();
+    let mut source = Vec::new();
+    let mut idx = Vec::with_capacity(tris.len() * 3);
+    let mut uvs = Vec::new();
+    for &t in tris {
+        let corners: [u32; 3] = mesh.indices[t * 3..t * 3 + 3].try_into().expect("three corners");
+        let p = corners.map(pos);
+        // A face with no area (a sphere's pole fan, say) goes where its corners' normals point,
+        // not wherever a zero normal happens to fall.
+        // Rounding leaves such faces a sliver of area, so "no area" is relative to its size.
+        let cross = (p[1] - p[0]).cross(p[2] - p[0]);
+        let longest = [p[1] - p[0], p[2] - p[1], p[0] - p[2]].map(|e| e.length_squared()).into_iter().fold(0.0, f32::max);
+        let normal = if cross.length() > longest * 1e-5 {
+            cross.normalize()
+        } else {
+            corners.iter().map(|&v| Vec3::from(mesh.vertices[v as usize].normal)).sum::<Vec3>().normalize_or(Vec3::Z)
+        };
+        // Which island the face goes to, and its corners' UVs.
+        let (island, uv): (u8, [Vec2; 3]) = match projection {
+            Projection::Planar { dir, up } => {
+                let dir = dir.normalize_or(Vec3::Z);
+                if normal.dot(dir) >= 0.0 {
+                    (0, flat(p, dir, up))
+                } else {
+                    (1, flat(p, -dir, up))
+                }
+            }
+            Projection::Box => {
+                let a = normal.abs();
+                let (k, dir) = if a.x >= a.y && a.x >= a.z {
+                    (0, Vec3::X * normal.x.signum())
+                } else if a.y >= a.z {
+                    (2, Vec3::Y * normal.y.signum())
+                } else {
+                    (4, Vec3::Z * normal.z.signum())
+                };
+                let side = if dir.max_element() > 0.0 { 0 } else { 1 };
+                (k + side, flat(p, dir, Vec3::Y))
+            }
+            Projection::Cylinder { .. } if normal.dot(axis).abs() > 0.75 => {
+                // Caps: flat along the axis, top and bottom apart.
+                let dir = axis * normal.dot(axis).signum();
+                (if dir.dot(axis) > 0.0 { 1 } else { 2 }, flat(p, dir, e1))
+            }
+            Projection::Cylinder { .. } => {
+                let d = p.map(|q| q - centre);
+                let height = d.map(|d| d.dot(axis));
+                let around = unwrapped_angles(d.map(|d| d - axis * d.dot(axis)), radius, &angle);
+                (0, [0, 1, 2].map(|k| Vec2::new(around[k] * radius, -height[k])))
+            }
+            Projection::Sphere { .. } => {
+                let d = p.map(|q| q - centre);
+                let around = unwrapped_angles(d.map(|d| d - axis * d.dot(axis)), radius, &angle);
+                let latitude = d.map(|d| d.normalize_or_zero().dot(axis).clamp(-1.0, 1.0).asin());
+                (0, [0, 1, 2].map(|k| Vec2::new(around[k] * radius, -latitude[k] * radius)))
+            }
+        };
+        // Islands start far apart: xatlas joins faces that touch in UV space, and a box's
+        // opposite sides (or a plane's front and back) would otherwise sit on top of each other.
+        let uv = uv.map(|q| q * scale + Vec2::X * island as f32 * apart);
+        for (k, &v) in corners.iter().enumerate() {
+            let key = (v, island, [uv[k].x.to_bits(), uv[k].y.to_bits()]);
+            let next = source.len() as u32;
+            let local = *weld.entry(key).or_insert_with(|| {
+                source.push(v);
+                uvs.extend([uv[k].x, uv[k].y]);
+                next
+            });
+            idx.push(local);
+        }
+    }
+    (source, idx, uvs)
+}
+
+/// Two unit vectors at right angles to `axis` and each other, with `e1 x e2 = axis`.
+fn frame(axis: Vec3) -> (Vec3, Vec3) {
+    let hint = if axis.dot(Vec3::Y).abs() > 0.9 { Vec3::X } else { Vec3::Y };
+    let e2 = axis.cross(hint).normalize();
+    let e1 = e2.cross(axis);
+    (e1, e2)
+}
+
+/// Corners `p` flattened looking down `-dir`, `up` towards the top of the layout. The axes
+/// keep a face's winding: a face pointing along `dir` stays counter-clockwise.
+fn flat(p: [Vec3; 3], dir: Vec3, up: Vec3) -> [Vec2; 3] {
+    let up = (up - dir * up.dot(dir)).try_normalize().unwrap_or_else(|| frame(dir).0);
+    let right = up.cross(dir);
+    // v runs down the image, so the top of the layout is the smallest v.
+    p.map(|q| Vec2::new(q.dot(right), -q.dot(up)))
+}
+
+/// Angle around the axis of each corner (`radial` is the corner's offset from the axis),
+/// kept within half a turn of the others so a face across the seam doesn't span the whole
+/// layout. A corner on the axis itself takes the angle of the face's middle. Used with v
+/// running down the image (up the axis at the top), the sides wind the same way as the
+/// faces [`flat`] lays out.
+fn unwrapped_angles(radial: [Vec3; 3], radius: f32, angle: &dyn Fn(Vec3) -> f32) -> [f32; 3] {
+    use std::f32::consts::{PI, TAU};
+    let middle = angle(radial[0] + radial[1] + radial[2]);
+    let mut a = radial.map(|r| if r.length() < radius * 1e-4 { middle } else { angle(r) });
+    let lowest = a.iter().cloned().fold(f32::MAX, f32::min);
+    let highest = a.iter().cloned().fold(f32::MIN, f32::max);
+    if highest - lowest > PI {
+        for x in &mut a {
+            if *x < PI {
+                *x += TAU;
+            }
+        }
+    }
+    a
 }
 
 // ---------------------------------------------------------------- health
@@ -283,7 +501,8 @@ pub fn health(mesh: &Mesh, material: usize) -> Health {
     let weighted = |f: &dyn Fn(&(f32, f32, f32)) -> f64| {
         if area_sum > 0.0 { rows.iter().map(|r| r.0 as f64 * f(r)).sum::<f64>() / area_sum } else { 0.0 }
     };
-    let stretch = weighted(&|r| r.2 as f64) as f32;
+    // Capped, so a few faces seen edge-on (stretched near infinitely) don't swamp the rest.
+    let stretch = weighted(&|r| r.2.min(10.0) as f64) as f32;
     let badly_stretched = weighted(&|r| if r.2 > 1.5 { 1.0 } else { 0.0 }) as f32;
     let size = texset::SIZE as f64;
     let density = if area_sum > 0.0 { ((uv_sum / area_sum).sqrt() * size) as f32 } else { 0.0 };
@@ -452,6 +671,56 @@ mod tests {
         for (a, b) in mesh.indices.iter().zip(&out.mesh.indices) {
             assert_eq!(mesh.vertices[*a as usize].pos, out.mesh.vertices[*b as usize].pos);
         }
+    }
+
+    /// Every projection gives every face a place of its own in the square.
+    #[test]
+    fn projections_give_clean_layouts() {
+        let tilted = Vec3::new(0.3, 0.5, 1.0);
+        let cases = [
+            ("planar", Projection::Planar { dir: tilted, up: Vec3::Y }),
+            ("box", Projection::Box),
+            ("cylinder", Projection::Cylinder { axis: Vec3::Y }),
+            ("sphere", Projection::Sphere { axis: Vec3::Z }),
+        ];
+        for (name, projection) in cases {
+            for mesh in [no_uvs(mesh::sphere(48, 24)), mesh::cube()] {
+                let out = run(&mesh, Mode::Project(projection), &Progress::default()).expect(name);
+                for (a, b) in mesh.indices.iter().zip(&out.mesh.indices) {
+                    assert_eq!(mesh.vertices[*a as usize].pos, out.mesh.vertices[*b as usize].pos, "{name}");
+                }
+                let h = health(&out.mesh, 0);
+                assert!(h.overlap < 0.002, "{name} on {} tris: overlap {} islands {}", mesh.triangle_count(), h.overlap, h.islands);
+                assert!(h.outside == 0.0, "{name}: outside {}", h.outside);
+                // A cube wrapped as a sphere is a thin band, which is right but fills little.
+                if mesh.triangle_count() > 12 {
+                    assert!(h.used > 0.2, "{name}: used {}", h.used);
+                    assert!(h.collapsed * 50 < h.surfaced, "{name}: {} of {} collapsed", h.collapsed, h.surfaced);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_and_cylinder_keep_flat_faces_unstretched() {
+        let cube = mesh::cube();
+        for projection in [Projection::Box, Projection::Cylinder { axis: Vec3::Y }] {
+            let out = run(&cube, Mode::Project(projection), &Progress::default()).expect("project");
+            let h = health(&out.mesh, 0);
+            // Unrolling bends a flat side around the axis a little; the box keeps it exact.
+            let limit = if projection == Projection::Box { 1.01 } else { 1.12 };
+            assert!(h.stretch < limit, "{projection:?}: stretch {}", h.stretch);
+            assert_eq!(h.islands, if projection == Projection::Box { 6 } else { 3 }, "{projection:?}");
+        }
+    }
+
+    #[test]
+    fn cylinder_seam_does_not_span_the_layout() {
+        // Without the wrap fix, faces across the seam would stretch over the whole width.
+        let out = run(&no_uvs(mesh::sphere(48, 24)), Mode::Project(Projection::Cylinder { axis: Vec3::Y }), &Progress::default())
+            .expect("cylinder");
+        let h = health(&out.mesh, 0);
+        assert!(h.badly_stretched < 0.25, "badly stretched {}", h.badly_stretched);
     }
 
     #[test]

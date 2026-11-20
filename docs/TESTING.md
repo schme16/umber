@@ -19,12 +19,13 @@ Vulkan draws on the real card under Xvfb; only presenting goes through X. The lo
 `GPU: NVIDIA GeForce RTX 4080 SUPER (Vulkan, DiscreteGpu)` in `target/captures/umber.log`
 confirms it. If it names llvmpipe or lavapipe, the run didn't use the GPU.
 
-Unwrapping and repacking need models with no UVs and with poorly packed ones:
+Unwrapping, projecting and repacking need models with no UVs and with poorly packed ones:
 
 ```bash
 python3 scripts/make-test-models.py target/models
 scripts/capture.sh scripts/captures/unwrap.sh target/models/knot-no-uvs.obj
 scripts/capture.sh scripts/captures/repack.sh target/models/crate-loose-uvs.obj
+scripts/capture.sh scripts/captures/projections.sh target/models/vase-no-uvs.obj
 ```
 
 Things Xvfb cannot show (the Huion pen itself, presenting to a real monitor) go to the user as
@@ -33,4 +34,4 @@ a hand-off.
 ## Unit tests
 
 `cargo test`. The pressure curve and XInput2 fixed-point maths are in `src/pen.rs`; unwrap,
-repack and the UV health numbers in `src/unwrap.rs`; paint transfer to new UVs in `src/texset.rs`.
+the projections, repack and the UV health numbers in `src/unwrap.rs`; paint transfer to new UVs in `src/texset.rs`.

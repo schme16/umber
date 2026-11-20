@@ -84,7 +84,11 @@ with the pen, see it lit, export to Godot.
    its old position, through the old padding map so seams don't show), and the whole change
    is one undo step. The UV workspace shows UV health per material: a coverage map with
    overlaps in red, texture used, overlap, stretch, texel density, area outside 0 to 1,
-   islands, and a sentence on what to do about anything that's off.
+   islands, and a sentence on what to do about anything that's off. Besides **Auto**, the
+   **Unwrap** picker lays a model out by projection: **Planar** (from the view or an axis, with
+   the back as its own island so it never shares paint with the front), **Box**, **Cylinder**
+   (with flat caps) and **Sphere**. They pack through xatlas too, so each lands in the square
+   without overlaps, and the paint moves with them the same way.
 6. **Export.** GLB with embedded PBR maps, plus a Godot `.tres` StandardMaterial3D
    pointing at ORM-packed PNGs. FBX import via ufbx.
 

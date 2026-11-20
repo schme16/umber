@@ -40,15 +40,29 @@ pub fn icon_action(ui: &mut Ui, icon: char, enabled: bool, size: f32, tooltip: &
 
 /// Segmented control: one choice out of a few, shown side by side.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], height: f32) -> bool {
+    segmented_to(ui, value, options, height, None)
+}
+
+/// [`segmented`] stretched across the width left in `ui`, the spare room shared out evenly.
+pub fn segmented_fill<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], height: f32) -> bool {
+    let width = ui.available_width();
+    segmented_to(ui, value, options, height, Some(width))
+}
+
+fn segmented_to<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], height: f32, fill: Option<f32>) -> bool {
     let font = theme::medium(13.0);
-    let pad = 14.0;
-    let widths: Vec<f32> = options
+    let chrome = 6.0 + 2.0 * (options.len() as f32 - 1.0);
+    let text: Vec<f32> = options
         .iter()
-        .map(|(_, label)| {
-            ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), TEXT).size().x) + pad * 2.0
-        })
+        .map(|(_, label)| ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), TEXT).size().x))
         .collect();
-    let total = widths.iter().sum::<f32>() + 6.0 + 2.0 * (options.len() as f32 - 1.0);
+    let pad = match fill {
+        // Never tighter than 6 a side, even if that overflows.
+        Some(width) => ((width - chrome - text.iter().sum::<f32>()) / (2.0 * options.len() as f32)).max(6.0),
+        None => 14.0,
+    };
+    let widths: Vec<f32> = text.iter().map(|t| t + pad * 2.0).collect();
+    let total = widths.iter().sum::<f32>() + chrome;
     let (outer, _) = ui.allocate_exact_size(egui::vec2(total, height), Sense::hover());
     let painter = ui.painter_at(outer.expand(1.0));
     painter.rect(outer, CornerRadius::same(10), SEG_BG, Stroke::new(1.0, TOPBAR_LINE), egui::StrokeKind::Inside);

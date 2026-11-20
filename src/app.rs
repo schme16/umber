@@ -10,6 +10,7 @@ use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Re
 
 use crate::brush::{self, BrushEngine, Dab};
 use crate::camera::OrbitCamera;
+use glam::Vec3;
 use crate::history::{Applied, Change, History};
 use crate::mesh::{self, Mesh};
 use crate::pen::{PenInput, PressureCurve};
@@ -28,6 +29,56 @@ enum Workspace {
     Uv,
     Materials,
     Export,
+}
+
+/// How the UV panel lays a model out. Each maps to an [`unwrap::Mode`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnwrapMethod {
+    Auto,
+    Planar,
+    Box,
+    Cylinder,
+    Sphere,
+}
+
+impl UnwrapMethod {
+    const ALL: [(UnwrapMethod, &'static str); 5] = [
+        (UnwrapMethod::Auto, "Auto"),
+        (UnwrapMethod::Planar, "Planar"),
+        (UnwrapMethod::Box, "Box"),
+        (UnwrapMethod::Cylinder, "Cylinder"),
+        (UnwrapMethod::Sphere, "Sphere"),
+    ];
+
+    fn about(self) -> &'static str {
+        match self {
+            UnwrapMethod::Auto => "Cuts seams where they show least and lays the pieces out. Right for most models.",
+            UnwrapMethod::Planar => "Flat from one side, like a photo. The back gets its own island; faces seen edge-on get squeezed.",
+            UnwrapMethod::Box => "Each face flat from the side it faces most. Good for hard surfaces, crates and buildings.",
+            UnwrapMethod::Cylinder => "Wrapped around an axis and unrolled, with flat caps. Good for limbs, bottles, pillars and trunks.",
+            UnwrapMethod::Sphere => "Wrapped like a globe. Good for heads, rocks and fruit; squeezes near the poles.",
+        }
+    }
+}
+
+/// Which way a projection looks or turns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnwrapAxis {
+    /// Along the camera, as the viewport shows the model now.
+    View,
+    X,
+    Y,
+    Z,
+}
+
+impl UnwrapAxis {
+    fn vector(self) -> Vec3 {
+        match self {
+            UnwrapAxis::X => Vec3::X,
+            UnwrapAxis::Y | UnwrapAxis::View => Vec3::Y,
+            UnwrapAxis::Z => Vec3::Z,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,6 +263,11 @@ pub struct UmberApp {
     uv_health: Option<(usize, Health, egui::TextureHandle)>,
     /// "Not now" on the offer to unwrap a model that has no UVs.
     no_uv_offer_dismissed: bool,
+    /// The UV panel's last choices, kept for the next unwrap.
+    unwrap_method: UnwrapMethod,
+    planar_axis: UnwrapAxis,
+    /// Shared by cylinder and sphere.
+    round_axis: UnwrapAxis,
 
     view_mode: ViewMode,
     light_yaw: f32,
@@ -253,6 +309,9 @@ impl UmberApp {
             unwrap_job: None,
             uv_health: None,
             no_uv_offer_dismissed: false,
+            unwrap_method: UnwrapMethod::Auto,
+            planar_axis: UnwrapAxis::View,
+            round_axis: UnwrapAxis::Y,
             view_mode: ViewMode::Lit,
             light_yaw: 0.8,
             exposure: 1.0,
@@ -317,6 +376,30 @@ impl UmberApp {
         self.unwrap_job = Some(UnwrapJob { mode, progress, result, generation: self.mesh_generation });
     }
 
+    /// The unwrap the UV panel's choices add up to, looking from the camera as it is now.
+    fn chosen_unwrap(&self) -> unwrap::Mode {
+        use unwrap::Projection;
+        let round = self.round_axis.vector();
+        let projection = match self.unwrap_method {
+            UnwrapMethod::Auto => return unwrap::Mode::Unwrap,
+            UnwrapMethod::Planar if self.planar_axis == UnwrapAxis::View => {
+                let view = self.camera.view();
+                let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
+                Projection::Planar { dir: (self.camera.eye() - self.camera.target).normalize_or(Vec3::Z), up }
+            }
+            UnwrapMethod::Planar => {
+                let dir = self.planar_axis.vector();
+                // Looking down from above, the front of the model is at the bottom.
+                let up = if self.planar_axis == UnwrapAxis::Y { Vec3::NEG_Z } else { Vec3::Y };
+                Projection::Planar { dir, up }
+            }
+            UnwrapMethod::Box => Projection::Box,
+            UnwrapMethod::Cylinder => Projection::Cylinder { axis: round },
+            UnwrapMethod::Sphere => Projection::Sphere { axis: round },
+        };
+        unwrap::Mode::Project(projection)
+    }
+
     fn poll_unwrap(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.unwrap_job else { return };
         let outcome = match job.result.try_recv() {
@@ -369,10 +452,7 @@ impl UmberApp {
         }
         self.history.push(Change::Mesh { mesh: Box::new(old), stacks });
         self.mesh_to_gpu();
-        let what = match mode {
-            unwrap::Mode::Unwrap => "Unwrapped",
-            unwrap::Mode::Repack => "Repacked",
-        };
+        let what = mode.done();
         let moved = if carry { " Paint moved with it; Ctrl+Z puts it back." } else { "" };
         self.toast = Some((format!("{what} {}.{moved}", self.mesh.as_ref().map_or("", |m| m.name.as_str())), self.now));
     }
@@ -1345,112 +1425,148 @@ impl UmberApp {
         let pos = egui::pos2(vp.right() - 16.0 - width, vp.top() + 16.0);
         egui::Area::new(egui::Id::unique("uv panel")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
             theme::panel_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
+                // On short screens the unwrap controls scroll into view rather than off the edge.
+                let tallest = vp.height() - 56.0;
                 ui.set_width(width - 26.0);
-                ui.label(egui::RichText::new("UV health").font(theme::semibold(14.0)));
-                let Some(mesh) = &self.mesh else {
-                    ui.label(egui::RichText::new("Open a model to check its UVs.").color(TEXT_3));
-                    return;
-                };
-                let set = self.active_set.min(self.sets.len().saturating_sub(1));
-                if self.sets.len() > 1 {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-                        for (i, s) in self.sets.iter().enumerate() {
-                            let mut on = i == set;
-                            if widgets::chip(ui, &s.name, &mut on).clicked() {
-                                self.active_set = i;
+                // A bar of its own, not floating over the numbers on the right.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                egui::ScrollArea::vertical().max_height(tallest).min_scrolled_height(tallest).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(egui::RichText::new("UV health").font(theme::semibold(14.0)));
+                    let Some(mesh) = &self.mesh else {
+                        ui.label(egui::RichText::new("Open a model to check its UVs.").color(TEXT_3));
+                        return;
+                    };
+                    let set = self.active_set.min(self.sets.len().saturating_sub(1));
+                    if self.sets.len() > 1 {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                            for (i, s) in self.sets.iter().enumerate() {
+                                let mut on = i == set;
+                                if widgets::chip(ui, &s.name, &mut on).clicked() {
+                                    self.active_set = i;
+                                }
                             }
+                        });
+                    } else {
+                        let name = self.sets.first().map_or("", |s| s.name.as_str());
+                        ui.label(egui::RichText::new(format!("{name} · {} px", texset::SIZE)).color(TEXT_3).size(12.0));
+                    }
+                    ui.add_space(8.0);
+
+                    if self.uv_health.as_ref().is_none_or(|(s, ..)| *s != set) {
+                        let health = unwrap::health(mesh, set);
+                        let texture = ctx.load_texture("uv coverage", coverage_image(&health), egui::TextureOptions::NEAREST);
+                        self.uv_health = Some((set, health, texture));
+                    }
+                    let (_, health, texture) = self.uv_health.as_ref().expect("just filled");
+
+                    // The layout itself: islands in brass, overlaps in red.
+                    let side = ui.available_width();
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), Sense::hover());
+                    let p = ui.painter();
+                    p.rect_filled(rect, CornerRadius::same(6), SEG_BG);
+                    for k in 1..4 {
+                        let t = k as f32 / 4.0;
+                        let line = Stroke::new(1.0, PANEL_LINE);
+                        p.vline(rect.left() + rect.width() * t, rect.y_range(), line);
+                        p.hline(rect.x_range(), rect.top() + rect.height() * t, line);
+                    }
+                    p.image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, PANEL_LINE), egui::StrokeKind::Inside);
+                    ui.add_space(8.0);
+
+                    let none_or = |v: f32, cut: f32| if v < cut { "none".to_owned() } else { pct(v) };
+                    let rows: [(&str, String, bool, &str); 6] = [
+                        ("Texture used", pct(health.used), health.used < 0.3 && !health.unusable(), "Share of the texture square the islands cover"),
+                        ("Overlap", none_or(health.overlap, 0.0005), health.overlap >= 0.005, "Texels more than one part of the model shares: paint there lands in both places"),
+                        (
+                            "Stretch",
+                            if health.stretch < 1.01 { "none".into() } else { format!("{:.0}%", (health.stretch - 1.0) * 100.0) },
+                            health.stretch > 1.25,
+                            "How much a round dab gets squashed on average, by surface area",
+                        ),
+                        (
+                            "Texel density",
+                            format!("{} px/m", fmt_count(health.density.round() as usize)),
+                            health.density_spread > 2.0,
+                            "Texels per metre (per model unit) at the texture size",
+                        ),
+                        ("Outside 0–1", none_or(health.outside, 0.001), health.outside >= 0.001, "UV area past the edge of the texture, where it repeats"),
+                        ("Islands", fmt_count(health.islands), false, "Separate pieces of the layout"),
+                    ];
+                    for (label, value, warn, tip) in rows {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(label).color(TEXT_2)).on_hover_text(tip);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(egui::RichText::new(value).font(theme::mono(12.0)).color(if warn { WARN } else { TEXT }));
+                            });
+                        });
+                    }
+                    panel_divider(ui);
+                    for line in uv_advice(health) {
+                        ui.label(egui::RichText::new(line).color(TEXT_2));
+                        ui.add_space(2.0);
+                    }
+                    ui.add_space(8.0);
+
+                    let busy = self.unwrap_job.is_some();
+                    let unusable = health.unusable() || !mesh.has_uvs;
+                    let mut start = None;
+                    panel_divider(ui);
+                    widgets::caps_label(ui, "Unwrap");
+                    ui.add_space(6.0);
+                    widgets::segmented_fill(ui, &mut self.unwrap_method, &UnwrapMethod::ALL, 34.0);
+                    let axes: &[(UnwrapAxis, &str)] = match self.unwrap_method {
+                        UnwrapMethod::Planar => &[(UnwrapAxis::View, "View"), (UnwrapAxis::X, "X"), (UnwrapAxis::Y, "Y"), (UnwrapAxis::Z, "Z")],
+                        UnwrapMethod::Cylinder | UnwrapMethod::Sphere => &[(UnwrapAxis::X, "X"), (UnwrapAxis::Y, "Y"), (UnwrapAxis::Z, "Z")],
+                        UnwrapMethod::Auto | UnwrapMethod::Box => &[],
+                    };
+                    if !axes.is_empty() {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let planar = self.unwrap_method == UnwrapMethod::Planar;
+                            let (label, tip) = if planar {
+                                ("From", "Which way to look at the model. View uses the camera as it is now.")
+                            } else {
+                                ("Around", "The axis the model is wrapped around: Y is up.")
+                            };
+                            ui.label(egui::RichText::new(label).color(TEXT_2)).on_hover_text(tip);
+                            // Right-aligned, with the choices still reading left to right.
+                            let labels: Vec<&str> = axes.iter().map(|a| a.1).collect();
+                            ui.add_space(ui.available_width() - widgets::segmented_width(ui.ctx(), &labels));
+                            let axis = if planar { &mut self.planar_axis } else { &mut self.round_axis };
+                            widgets::segmented(ui, axis, axes, 30.0);
+                        });
+                    }
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(self.unwrap_method.about()).color(TEXT_3).size(12.0));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let unwrap_tip = if busy { "Already working on it" } else { "Lay the model out again from scratch, the way chosen above" };
+                        let resp = ui.add_enabled_ui(!busy, |ui| widgets::button(ui, "Unwrap", unusable, 36.0)).inner;
+                        if resp.on_hover_text(unwrap_tip).on_disabled_hover_text(unwrap_tip).clicked() {
+                            start = Some(self.chosen_unwrap());
+                        }
+                        let repack_tip = if unusable {
+                            "Needs UVs to repack. Unwrap makes them."
+                        } else if busy {
+                            "Already working on it"
+                        } else {
+                            "Keep every island's shape and lay them out tighter"
+                        };
+                        let resp = ui.add_enabled_ui(!busy && !unusable, |ui| widgets::button(ui, "Repack", !unusable && health.used < 0.3, 36.0)).inner;
+                        if resp.on_hover_text(repack_tip).on_disabled_hover_text(repack_tip).clicked() {
+                            start = Some(unwrap::Mode::Repack);
                         }
                     });
-                } else {
-                    let name = self.sets.first().map_or("", |s| s.name.as_str());
-                    ui.label(egui::RichText::new(format!("{name} · {} px", texset::SIZE)).color(TEXT_3).size(12.0));
-                }
-                ui.add_space(8.0);
-
-                if self.uv_health.as_ref().is_none_or(|(s, ..)| *s != set) {
-                    let health = unwrap::health(mesh, set);
-                    let texture = ctx.load_texture("uv coverage", coverage_image(&health), egui::TextureOptions::NEAREST);
-                    self.uv_health = Some((set, health, texture));
-                }
-                let (_, health, texture) = self.uv_health.as_ref().expect("just filled");
-
-                // The layout itself: islands in brass, overlaps in red.
-                let side = ui.available_width();
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), Sense::hover());
-                let p = ui.painter();
-                p.rect_filled(rect, CornerRadius::same(6), SEG_BG);
-                for k in 1..4 {
-                    let t = k as f32 / 4.0;
-                    let line = Stroke::new(1.0, PANEL_LINE);
-                    p.vline(rect.left() + rect.width() * t, rect.y_range(), line);
-                    p.hline(rect.x_range(), rect.top() + rect.height() * t, line);
-                }
-                p.image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
-                p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, PANEL_LINE), egui::StrokeKind::Inside);
-                ui.add_space(8.0);
-
-                let none_or = |v: f32, cut: f32| if v < cut { "none".to_owned() } else { pct(v) };
-                let rows: [(&str, String, bool, &str); 6] = [
-                    ("Texture used", pct(health.used), health.used < 0.3 && !health.unusable(), "Share of the texture square the islands cover"),
-                    ("Overlap", none_or(health.overlap, 0.0005), health.overlap >= 0.005, "Texels more than one part of the model shares: paint there lands in both places"),
-                    (
-                        "Stretch",
-                        if health.stretch < 1.01 { "none".into() } else { format!("{:.0}%", (health.stretch - 1.0) * 100.0) },
-                        health.stretch > 1.25,
-                        "How much a round dab gets squashed on average, by surface area",
-                    ),
-                    (
-                        "Texel density",
-                        format!("{} px/m", fmt_count(health.density.round() as usize)),
-                        health.density_spread > 2.0,
-                        "Texels per metre (per model unit) at the texture size",
-                    ),
-                    ("Outside 0–1", none_or(health.outside, 0.001), health.outside >= 0.001, "UV area past the edge of the texture, where it repeats"),
-                    ("Islands", fmt_count(health.islands), false, "Separate pieces of the layout"),
-                ];
-                for (label, value, warn, tip) in rows {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(label).color(TEXT_2)).on_hover_text(tip);
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(egui::RichText::new(value).font(theme::mono(12.0)).color(if warn { WARN } else { TEXT }));
-                        });
-                    });
-                }
-                panel_divider(ui);
-                for line in uv_advice(health) {
-                    ui.label(egui::RichText::new(line).color(TEXT_2));
-                    ui.add_space(2.0);
-                }
-                ui.add_space(8.0);
-
-                let busy = self.unwrap_job.is_some();
-                let unusable = health.unusable() || !mesh.has_uvs;
-                let mut start = None;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    let unwrap_tip = if busy { "Already working on it" } else { "Cut new seams and lay the model out from scratch" };
-                    let resp = ui.add_enabled_ui(!busy, |ui| widgets::button(ui, "Auto-unwrap", unusable, 36.0)).inner;
-                    if resp.on_hover_text(unwrap_tip).on_disabled_hover_text(unwrap_tip).clicked() {
-                        start = Some(unwrap::Mode::Unwrap);
-                    }
-                    let repack_tip = if unusable {
-                        "Needs UVs to repack. Auto-unwrap makes them."
-                    } else if busy {
-                        "Already working on it"
-                    } else {
-                        "Keep every island's shape and lay them out tighter"
-                    };
-                    let resp = ui.add_enabled_ui(!busy && !unusable, |ui| widgets::button(ui, "Repack", !unusable && health.used < 0.3, 36.0)).inner;
-                    if resp.on_hover_text(repack_tip).on_disabled_hover_text(repack_tip).clicked() {
-                        start = Some(unwrap::Mode::Repack);
+                    ui.add_space(6.0);
+                    hint(ui, "Paint moves to the new layout, and Ctrl+Z undoes it. Seams, pins and straightening come later.");
+                    if let Some(mode) = start {
+                        self.start_unwrap(mode);
                     }
                 });
-                ui.add_space(6.0);
-                hint(ui, "Paint moves to the new layout with either, and Ctrl+Z undoes it. Seams, pins and straightening come later.");
-                if let Some(mode) = start {
-                    self.start_unwrap(mode);
-                }
             });
         });
     }
@@ -1473,10 +1589,7 @@ impl UmberApp {
                     ui.set_width(380.0);
                     match job {
                         Some((mode, progress)) => {
-                            let title = match mode {
-                                unwrap::Mode::Unwrap => "Unwrapping",
-                                unwrap::Mode::Repack => "Repacking",
-                            };
+                            let title = mode.doing();
                             ui.label(egui::RichText::new(format!("{title} {name}…")).font(theme::semibold(14.0)));
                             ui.add_space(8.0);
                             let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), Sense::hover());
@@ -1505,6 +1618,13 @@ impl UmberApp {
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 if widgets::button(ui, "Auto-unwrap", true, 36.0).clicked() {
                                     self.start_unwrap(unwrap::Mode::Unwrap);
+                                }
+                                if widgets::button(ui, "More ways", false, 36.0)
+                                    .on_hover_text("Planar, box, cylinder and sphere layouts, in the UV workspace")
+                                    .clicked()
+                                {
+                                    self.workspace = Workspace::Uv;
+                                    self.no_uv_offer_dismissed = true;
                                 }
                                 if widgets::button(ui, "Not now", false, 36.0).clicked() {
                                     self.no_uv_offer_dismissed = true;
@@ -1840,7 +1960,7 @@ fn coverage_image(health: &Health) -> egui::ColorImage {
 /// What the numbers mean, in a sentence each, worst first.
 fn uv_advice(h: &Health) -> Vec<String> {
     if h.unusable() {
-        return vec!["No usable UVs yet. Auto-unwrap lays the model out so it can be painted.".into()];
+        return vec!["No usable UVs yet. Unwrap lays the model out so it can be painted.".into()];
     }
     let mut out = Vec::new();
     if h.collapsed > 0 {
@@ -1853,7 +1973,7 @@ fn uv_advice(h: &Health) -> Vec<String> {
         out.push(format!("{} of the layout sits outside the texture, where it repeats.", pct(h.outside)));
     }
     if h.stretch > 1.25 {
-        out.push(format!("Dabs come out squashed on {} of the surface. Auto-unwrap cuts it into flatter pieces.", pct(h.badly_stretched)));
+        out.push(format!("Dabs come out squashed on {} of the surface. Unwrapping with Auto cuts it into flatter pieces.", pct(h.badly_stretched)));
     }
     if h.density_spread > 2.0 {
         out.push(format!("Detail varies {:.1}× across the model, so some parts will look blurrier than others.", h.density_spread));
