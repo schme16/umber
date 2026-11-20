@@ -118,8 +118,19 @@ pub fn button_width(ctx: &egui::Context, label: &str) -> f32 {
 
 /// Plain push button. `primary` uses the accent fill.
 pub fn button(ui: &mut Ui, label: &str, primary: bool, height: f32) -> Response {
+    let width = button_width(ui.ctx(), label);
+    button_sized(ui, label, primary, width, height)
+}
+
+/// A push button as wide as the space it's in, for the one action a panel exists for.
+pub fn button_full(ui: &mut Ui, label: &str, primary: bool, height: f32) -> Response {
+    let width = ui.available_width();
+    button_sized(ui, label, primary, width, height)
+}
+
+fn button_sized(ui: &mut Ui, label: &str, primary: bool, width: f32, height: f32) -> Response {
     let font = theme::semibold(13.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(button_width(ui.ctx(), label), height), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
     let painter = ui.painter_at(rect.expand(1.0));
     let (bg, fg) = match (primary, response.hovered()) {
         (true, false) => (ACCENT, ON_ACCENT),

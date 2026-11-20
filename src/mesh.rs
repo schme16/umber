@@ -178,13 +178,14 @@ pub struct Hit {
     pub bary: [f32; 3],
 }
 
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["glb", "gltf", "obj"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["glb", "gltf", "obj", "fbx"];
 
 pub fn load(path: &Path) -> Result<Mesh> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
     let mut mesh = match ext.as_str() {
         "glb" | "gltf" => load_gltf(path),
         "obj" => load_obj(path),
+        "fbx" => load_fbx(path),
         other => bail!("Umber can't open .{other} files yet. Supported: {}", SUPPORTED_EXTENSIONS.join(", ")),
     }
     .with_context(|| format!("Couldn't open {}", path.display()))?;
@@ -372,6 +373,173 @@ fn load_obj(path: &Path) -> Result<Mesh> {
     Ok(out)
 }
 
+fn load_fbx(path: &Path) -> Result<Mesh> {
+    let opts = ufbx::LoadOpts {
+        // Y up, metres, geometry baked into the target space: what glTF and Godot use.
+        target_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+        target_unit_meters: 1.0,
+        space_conversion: ufbx::SpaceConversion::ModifyGeometry,
+        generate_missing_normals: true,
+        // Blender writes its PBR materials as Phong in a fixed way; this reads them back as PBR.
+        use_blender_pbr_material: true,
+        ignore_animation: true,
+        load_external_files: false,
+        ..Default::default()
+    };
+    let scene = ufbx::load_file(&path.to_string_lossy(), opts).map_err(|e| anyhow::anyhow!("{}", e.description.as_ref() as &str))?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut out = Mesh {
+        name: String::new(),
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        submeshes: Vec::new(),
+        has_uvs: true,
+        materials: Vec::new(),
+    };
+    // FBX material element id (None = no material) -> index into out.materials.
+    let mut material_slots: std::collections::HashMap<Option<u32>, usize> = Default::default();
+    let mut tri = Vec::new();
+
+    for node in scene.nodes.iter() {
+        let Some(fmesh) = &node.mesh else { continue };
+        if !node.visible {
+            continue;
+        }
+        let m = &node.geometry_to_world;
+        let world = Mat4::from_cols_array(&[
+            m.m00 as f32, m.m10 as f32, m.m20 as f32, 0.0,
+            m.m01 as f32, m.m11 as f32, m.m21 as f32, 0.0,
+            m.m02 as f32, m.m12 as f32, m.m22 as f32, 0.0,
+            m.m03 as f32, m.m13 as f32, m.m23 as f32, 1.0,
+        ]);
+        let normal_mat = Mat3::from_mat4(world).inverse().transpose();
+        let flips_winding = Mat3::from_mat4(world).determinant() < 0.0;
+        let has_uvs = fmesh.vertex_uv.exists;
+        out.has_uvs &= has_uvs;
+
+        for part in fmesh.material_parts.iter() {
+            if part.num_triangles == 0 {
+                continue;
+            }
+            // Nodes can override the mesh's materials, as instances do.
+            let material = node.materials.get(part.index as usize).or_else(|| fmesh.materials.get(part.index as usize));
+            let slot = *material_slots.entry(material.map(|m| m.element.element_id)).or_insert_with(|| {
+                out.materials.push(match material {
+                    Some(m) => fbx_material(m, dir),
+                    None => Material::named(node.element.name.to_string()),
+                });
+                out.materials.len() - 1
+            });
+
+            // Corners welded by position, normal and UV, so the mesh shares vertices like any other.
+            let mut welded: std::collections::HashMap<[u32; 8], u32> = Default::default();
+            let base = out.vertices.len();
+            let mut idx = Vec::with_capacity(part.num_triangles * 3);
+            for &face in part.face_indices.iter() {
+                let face = fmesh.faces[face as usize];
+                let n = ufbx::triangulate_face_vec(&mut tri, fmesh, face);
+                for t in 0..n as usize {
+                    let corners = [tri[t * 3], tri[t * 3 + 1], tri[t * 3 + 2]];
+                    let corners = if flips_winding { [corners[0], corners[2], corners[1]] } else { corners };
+                    for c in corners {
+                        let c = c as usize;
+                        let p = fmesh.vertex_position[c];
+                        let pos = world.transform_point3(Vec3::new(p.x as f32, p.y as f32, p.z as f32));
+                        let normal = if fmesh.vertex_normal.exists {
+                            let n = fmesh.vertex_normal[c];
+                            (normal_mat * Vec3::new(n.x as f32, n.y as f32, n.z as f32)).normalize_or_zero()
+                        } else {
+                            Vec3::ZERO
+                        };
+                        // FBX puts v = 0 at the bottom; Umber uses top-left.
+                        let uv = if has_uvs {
+                            let t = fmesh.vertex_uv[c];
+                            [t.x as f32, 1.0 - t.y as f32]
+                        } else {
+                            [0.0; 2]
+                        };
+                        let v = Vertex { pos: pos.to_array(), normal: normal.to_array(), uv, tangent: [0.0; 4] };
+                        let key = [v.pos[0], v.pos[1], v.pos[2], v.normal[0], v.normal[1], v.normal[2], uv[0], uv[1]].map(f32::to_bits);
+                        let next = (out.vertices.len() - base) as u32;
+                        let local = *welded.entry(key).or_insert_with(|| {
+                            out.vertices.push(v);
+                            next
+                        });
+                        idx.push(local);
+                    }
+                }
+            }
+            if !fmesh.vertex_normal.exists {
+                compute_normals(&mut out.vertices[base..], &idx);
+            }
+            out.submeshes.push(Submesh { material: slot, index_start: out.indices.len() as u32, index_count: idx.len() as u32 });
+            out.indices.extend(idx.into_iter().map(|i| i + base as u32));
+        }
+    }
+    out.has_uvs &= !out.vertices.is_empty();
+    Ok(out)
+}
+
+/// An FBX material's base colour, roughness, metalness and base colour texture, from its PBR
+/// maps where the exporter wrote them and the classic diffuse ones where it didn't.
+fn fbx_material(m: &ufbx::Material, dir: &Path) -> Material {
+    let mut out = Material::named(m.element.name.to_string());
+    let (pbr, fbx) = (&m.pbr, &m.fbx);
+    let colour = if pbr.base_color.has_value { &pbr.base_color } else { &fbx.diffuse_color };
+    if colour.has_value {
+        let c = colour.value_vec4;
+        let factor = if pbr.base_factor.has_value { pbr.base_factor.value_vec4.x } else { 1.0 };
+        out.base_color = [(c.x * factor) as f32, (c.y * factor) as f32, (c.z * factor) as f32, 1.0];
+    }
+    // Plain Phong materials have no real roughness or metalness; guessing one from shininess
+    // tends to come out as a mirror, so those keep Umber's defaults.
+    if m.features.pbr.enabled {
+        if pbr.roughness.has_value {
+            out.roughness = pbr.roughness.value_vec4.x as f32;
+        }
+        if pbr.metalness.has_value {
+            out.metallic = pbr.metalness.value_vec4.x as f32;
+        }
+    }
+    let texture = pbr.base_color.texture.as_ref().or(fbx.diffuse_color.texture.as_ref());
+    if let Some(img) = texture.and_then(|tex| fbx_texture(tex, dir)) {
+        out.base_color = [1.0; 4];
+        out.base_color_texture = Some(img);
+    }
+    out
+}
+
+/// A texture's pixels: embedded in the file, at the path it names, or beside the model with
+/// the same file name (how most files arrive once they've been moved between machines).
+fn fbx_texture(tex: &ufbx::Texture, dir: &Path) -> Option<Image> {
+    let decoded = if !tex.content.is_empty() {
+        image::load_from_memory(&tex.content).ok()
+    } else {
+        let names = [tex.absolute_filename.to_string(), tex.relative_filename.to_string(), tex.filename.to_string()];
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        for n in names.iter().filter(|n| !n.is_empty()) {
+            let p = Path::new(n);
+            candidates.push(if p.is_absolute() { p.to_owned() } else { dir.join(p) });
+            // Windows paths keep their backslashes on Linux; the last part is the file name.
+            if let Some(file) = n.rsplit(['/', '\\']).next() {
+                candidates.push(dir.join(file));
+                candidates.push(dir.join("textures").join(file));
+            }
+        }
+        candidates.into_iter().find_map(|p| image::open(&p).ok())
+    };
+    match decoded {
+        Some(img) => {
+            let img = img.to_rgba8();
+            Some(Image { width: img.width(), height: img.height(), rgba: img.into_raw() })
+        }
+        None => {
+            log::warn!("Couldn't find the texture {}", tex.filename.as_ref() as &str);
+            None
+        }
+    }
+}
+
 /// Area-weighted smooth normals. `indices` are local to `verts`.
 fn compute_normals(verts: &mut [Vertex], indices: &[u32]) {
     let mut acc = vec![Vec3::ZERO; verts.len()];
@@ -485,5 +653,135 @@ fn builtin(name: &str, mut vertices: Vec<Vertex>, indices: Vec<u32>) -> Mesh {
         indices,
         has_uvs: true,
         materials: vec![material],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Z-up quad in metres with one material, as Blender or Maya might write it in ASCII.
+    const QUAD_FBX: &str = r#"; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",2
+		P: "UpAxisSign", "int", "Integer", "",1
+		P: "FrontAxis", "int", "Integer", "",1
+		P: "FrontAxisSign", "int", "Integer", "",-1
+		P: "CoordAxis", "int", "Integer", "",0
+		P: "CoordAxisSign", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",100
+	}
+}
+Objects:  {
+	Geometry: 1000, "Geometry::Quad", "Mesh" {
+		Vertices: *12 {
+			a: 0,0,0,1,0,0,1,1,0,0,1,0
+		}
+		PolygonVertexIndex: *4 {
+			a: 0,1,2,-4
+		}
+		LayerElementUV: 0 {
+			Version: 101
+			Name: "UVMap"
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "IndexToDirect"
+			UV: *8 {
+				a: 0,0,1,0,1,1,0,1
+			}
+			UVIndex: *4 {
+				a: 0,1,2,3
+			}
+		}
+		LayerElementMaterial: 0 {
+			Version: 101
+			MappingInformationType: "AllSame"
+			ReferenceInformationType: "IndexToDirect"
+			Materials: *1 {
+				a: 0
+			}
+		}
+		Layer: 0 {
+			Version: 100
+			LayerElement:  {
+				Type: "LayerElementUV"
+				TypedIndex: 0
+			}
+			LayerElement:  {
+				Type: "LayerElementMaterial"
+				TypedIndex: 0
+			}
+		}
+	}
+	Model: 2000, "Model::Quad", "Mesh" {
+		Version: 232
+	}
+	Material: 3000, "Material::Brass", "" {
+		Version: 102
+		ShadingModel: "phong"
+		Properties70:  {
+			P: "DiffuseColor", "Color", "", "A",0.8,0.6,0.2
+		}
+	}
+}
+Connections:  {
+	C: "OO",2000,0
+	C: "OO",1000,2000
+	C: "OO",3000,2000
+}
+"#;
+
+    #[test]
+    fn fbx_quad_comes_in_y_up_with_its_material() {
+        let path = std::env::temp_dir().join(format!("umber-quad-{}.fbx", std::process::id()));
+        std::fs::write(&path, QUAD_FBX).unwrap();
+        let mesh = load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(mesh.triangle_count(), 2);
+        assert!(mesh.has_uvs);
+        assert_eq!(mesh.materials.len(), 1);
+        assert_eq!(mesh.materials[0].name, "Brass");
+        assert!((mesh.materials[0].base_color[0] - 0.8).abs() < 1e-4);
+        // Z up became Y up: the quad lies flat, a metre across, facing up.
+        let (lo, hi) = mesh.bounds();
+        assert!(lo.y.abs() < 1e-5 && hi.y.abs() < 1e-5, "{lo} {hi}");
+        assert!(((hi - lo).x - 1.0).abs() < 1e-4 && ((hi - lo).z - 1.0).abs() < 1e-4, "{lo} {hi}");
+        assert!(mesh.vertices.iter().all(|v| v.normal[1] > 0.99));
+        // Welded: four corners, not six.
+        assert_eq!(mesh.vertices.len(), 4);
+        // The FBX corner at uv (0, 0) is at the bottom of the image, which is v = 1 here.
+        assert!(mesh.vertices.iter().any(|v| v.uv == [0.0, 1.0]));
+    }
+
+    /// Opens every model in $UMBER_TEST_MODELS (skipped when it isn't set).
+    #[test]
+    fn opens_every_model_in_a_folder() {
+        let Some(dir) = std::env::var_os("UMBER_TEST_MODELS") else { return };
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if !SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+                continue;
+            }
+            let t = std::time::Instant::now();
+            match load(&path) {
+                Ok(m) => {
+                    let (lo, hi) = m.bounds();
+                    let textured = m.materials.iter().filter(|m| m.base_color_texture.is_some()).count();
+                    let rm: Vec<String> = m.materials.iter().map(|m| format!("{:.2}/{:.2}", m.roughness, m.metallic)).collect();
+                    println!("  rough/metal {}", rm.join(" "));
+                    println!(
+                        "{}: {} tris, {} materials ({textured} textured), uvs {}, size {:.2?}, {:?}",
+                        m.name, m.triangle_count(), m.materials.len(), m.has_uvs, (hi - lo).to_array(), t.elapsed()
+                    );
+                }
+                Err(e) => println!("{}: FAILED {e:#}", path.display()),
+            }
+        }
     }
 }

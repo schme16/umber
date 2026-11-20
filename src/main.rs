@@ -3,6 +3,7 @@
 mod app;
 mod brush;
 mod camera;
+mod export;
 mod history;
 mod icons;
 mod mesh;

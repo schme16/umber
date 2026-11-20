@@ -28,10 +28,25 @@ scripts/capture.sh scripts/captures/repack.sh target/models/crate-loose-uvs.obj
 scripts/capture.sh scripts/captures/projections.sh target/models/vase-no-uvs.obj
 ```
 
+Export needs a folder given up front, because the folder picker would open on the real desktop
+through the portal. `UMBER_EXPORT_DIR` presets it:
+
+```bash
+mkdir -p target/godot-test/models   # with a project.godot in target/godot-test
+UMBER_EXPORT_DIR=$PWD/target/godot-test/models scripts/capture.sh scripts/captures/export.sh
+UMBER_EXPORT_DIR=$PWD/target/godot-test/models scripts/capture.sh scripts/captures/export-fbx.sh some.fbx
+```
+
+`scripts/godot-check.gd` loads everything in that project's `res://models` with a headless Godot
+and prints which texture fills each material slot.
+
 Things Xvfb cannot show (the Huion pen itself, presenting to a real monitor) go to the user as
 a hand-off.
 
 ## Unit tests
 
 `cargo test`. The pressure curve and XInput2 fixed-point maths are in `src/pen.rs`; unwrap,
-the projections, repack and the UV health numbers in `src/unwrap.rs`; paint transfer to new UVs in `src/texset.rs`.
+the projections, repack and the UV health numbers in `src/unwrap.rs`; paint transfer to new UVs in `src/texset.rs`;
+FBX import in `src/mesh.rs`; export naming, `res://` paths, map readback and a GLB round trip in
+`src/export.rs`. `UMBER_TEST_MODELS=dir cargo test opens_every -- --nocapture` opens every model
+in a folder and prints what came in.

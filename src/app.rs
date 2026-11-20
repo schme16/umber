@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{mpsc, Arc};
 
 use eframe::egui_wgpu;
 use eframe::egui_wgpu::wgpu::util::DeviceExt;
@@ -10,6 +11,7 @@ use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Re
 
 use crate::brush::{self, BrushEngine, Dab};
 use crate::camera::OrbitCamera;
+use crate::export;
 use glam::Vec3;
 use crate::history::{Applied, Change, History};
 use crate::mesh::{self, Mesh};
@@ -221,6 +223,13 @@ struct UnwrapJob {
     generation: u64,
 }
 
+/// An export writing files on a worker thread.
+struct ExportJob {
+    plan: export::Plan,
+    done: Arc<AtomicU32>,
+    result: mpsc::Receiver<anyhow::Result<()>>,
+}
+
 enum LayerAction {
     Up,
     Down,
@@ -272,6 +281,16 @@ pub struct UmberApp {
     view_mode: ViewMode,
     light_yaw: f32,
     exposure: f32,
+
+    /// Where the open model came from, so the export folder picker can start beside it.
+    model_path: Option<PathBuf>,
+    /// Asked for on the first export, then reused, so exporting again is one click.
+    export_dir: Option<PathBuf>,
+    /// One of [`export::SIZES`].
+    export_size: u32,
+    export_job: Option<ExportJob>,
+    /// What the last export wrote, and when.
+    last_export: Option<(String, f64)>,
 }
 
 impl UmberApp {
@@ -315,6 +334,12 @@ impl UmberApp {
             view_mode: ViewMode::Lit,
             light_yaw: 0.8,
             exposure: 1.0,
+            model_path: None,
+            // Scripted captures set this, since a folder picker would open on the real desktop.
+            export_dir: std::env::var_os("UMBER_EXPORT_DIR").map(PathBuf::from),
+            export_size: export::SIZES[0],
+            export_job: None,
+            last_export: None,
         };
         if let Some(path) = initial_file {
             app.open_path(&path, 0.0);
@@ -457,12 +482,209 @@ impl UmberApp {
         self.toast = Some((format!("{what} {}.{moved}", self.mesh.as_ref().map_or("", |m| m.name.as_str())), self.now));
     }
 
+    // ---------------------------------------------------------------- export
+
+    fn export_plan(&self, dir: &Path) -> Option<export::Plan> {
+        let mesh = self.mesh.as_ref()?;
+        let names: Vec<&str> = mesh.materials.iter().map(|m| m.name.as_str()).collect();
+        Some(export::Plan::new(dir, &mesh.name, &names))
+    }
+
+    /// The top bar's button and Ctrl+E: the first time it asks where, after that it just goes.
+    fn export_to_godot(&mut self) {
+        if self.export_job.is_some() {
+            return;
+        }
+        let Some(mesh) = &self.mesh else {
+            self.toast = Some(("Open a model first, then export it.".into(), self.now));
+            return;
+        };
+        if !mesh.has_uvs {
+            self.toast = Some(("This model has no UVs yet, so its maps wouldn't line up. Unwrap it first.".into(), self.now));
+            self.workspace = Workspace::Uv;
+            return;
+        }
+        let dir = match self.export_dir.clone() {
+            Some(dir) => dir,
+            None => match self.pick_export_dir() {
+                Some(dir) => dir,
+                None => return,
+            },
+        };
+        self.start_export(dir);
+    }
+
+    fn pick_export_dir(&mut self) -> Option<PathBuf> {
+        let start = self.export_dir.clone().or_else(|| self.model_path.as_ref().and_then(|p| p.parent().map(Path::to_owned)));
+        let mut dialog = rfd::FileDialog::new().set_title("Export to which folder? One inside your Godot project works best");
+        if let Some(start) = start {
+            dialog = dialog.set_directory(start);
+        }
+        let dir = dialog.pick_folder()?;
+        self.export_dir = Some(dir.clone());
+        Some(dir)
+    }
+
+    /// Read the maps back now (it takes a moment on the GPU), then encode and write them on a
+    /// worker thread so the window keeps drawing.
+    fn start_export(&mut self, dir: PathBuf) {
+        let (Some(plan), Some(mesh)) = (self.export_plan(&dir), self.mesh.clone()) else { return };
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        for set in &mut self.sets {
+            self.compositor.update(device, queue, set);
+        }
+        let maps: Vec<export::SetMaps> = self.sets.iter().map(|s| export::read_maps(device, queue, s, self.export_size)).collect();
+        let done = Arc::new(AtomicU32::new(0));
+        let (tx, rx) = mpsc::channel();
+        let (job_plan, job_done) = (plan.clone(), done.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(export::write(&job_plan, &mesh, &maps, &job_done));
+        });
+        self.export_job = Some(ExportJob { plan, done, result: rx });
+    }
+
+    fn poll_export(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.export_job else { return };
+        let outcome = match job.result.try_recv() {
+            Ok(outcome) => outcome,
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("The export stopped unexpectedly")),
+        };
+        let job = self.export_job.take().expect("checked above");
+        match outcome {
+            Ok(()) => {
+                let plan = &job.plan;
+                let maps = plan.materials.len() * 3;
+                let what = match plan.materials.len() {
+                    1 => format!("{}, its material and {maps} maps", plan.glb),
+                    n => format!("{}, {n} materials and {maps} maps", plan.glb),
+                };
+                let msg = match (&plan.godot, plan.res_dir()) {
+                    (Some(g), Some(res)) => format!("Exported {what} to {res} in {}. Godot picks them up when you switch to it.", g.name),
+                    _ => format!("Exported {what} to {}.", home_relative(&plan.dir)),
+                };
+                self.toast = Some((msg.clone(), self.now));
+                self.last_export = Some((msg, self.now));
+            }
+            Err(e) => {
+                log::error!("{e:#}");
+                self.toast = Some((format!("{e:#}"), self.now));
+            }
+        }
+    }
+
+    fn export_panel(&mut self, ctx: &egui::Context, vp: Rect) {
+        let width = 320.0;
+        let pos = egui::pos2(vp.right() - 16.0 - width, vp.top() + 16.0);
+        egui::Area::new(egui::Id::unique("export panel")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+            theme::panel_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
+                ui.set_width(width - 26.0);
+                let tallest = vp.height() - 56.0;
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                egui::ScrollArea::vertical().max_height(tallest).min_scrolled_height(tallest).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(egui::RichText::new("Export to Godot").font(theme::semibold(14.0)));
+                    let Some(mesh) = &self.mesh else {
+                        ui.label(egui::RichText::new("Open a model to export it.").color(TEXT_3));
+                        return;
+                    };
+                    let has_uvs = mesh.has_uvs;
+                    ui.label(
+                        egui::RichText::new("A .glb with the maps inside, and a Godot material for each texture set that uses the same maps.")
+                            .color(TEXT_2),
+                    );
+                    panel_divider(ui);
+
+                    widgets::caps_label(ui, "Folder");
+                    ui.add_space(4.0);
+                    let plan = self.export_dir.as_ref().and_then(|d| self.export_plan(d));
+                    let choose = match &plan {
+                        Some(plan) => {
+                            // Inside a project, the path Godot shows is the one that means something.
+                            let (path, note) = match (&plan.godot, plan.res_dir()) {
+                                (Some(g), Some(res)) => (res, format!("In {}, a Godot project.", g.name)),
+                                _ => (
+                                    home_relative(&plan.dir),
+                                    "Not inside a Godot project. The materials point at the maps beside them, so keep the files together.".to_owned(),
+                                ),
+                            };
+                            ui.label(egui::RichText::new(path).font(theme::mono(12.0)).color(TEXT)).on_hover_text(plan.dir.display().to_string());
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new(note).color(TEXT_2));
+                            ui.add_space(6.0);
+                            widgets::button(ui, "Change folder", false, 32.0).clicked()
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("Pick a folder inside your Godot project, and Umber remembers it for next time.").color(TEXT_2));
+                            ui.add_space(6.0);
+                            widgets::button(ui, "Choose folder", false, 32.0).clicked()
+                        }
+                    };
+                    panel_divider(ui);
+
+                    widgets::caps_label(ui, "Texture size");
+                    ui.add_space(6.0);
+                    let sizes = export::SIZES.map(|s| (s, if s == 2048 { "2048" } else if s == 1024 { "1024" } else { "512" }));
+                    widgets::segmented_fill(ui, &mut self.export_size, &sizes, 34.0);
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Pixels along each side of every map. Smaller suits phones and distant props.").color(TEXT_3));
+
+                    if let Some(plan) = &plan {
+                        panel_divider(ui);
+                        widgets::caps_label(ui, "Writes");
+                        ui.add_space(4.0);
+                        for f in plan.files() {
+                            ui.label(egui::RichText::new(f).font(theme::mono(12.0)).color(TEXT_2));
+                        }
+                    }
+                    panel_divider(ui);
+
+                    let job = self.export_job.as_ref().map(|j| j.done.load(Ordering::Relaxed) as f32 / export::total_steps(&j.plan) as f32);
+                    let mut go = false;
+                    match job {
+                        Some(fraction) => {
+                            ui.label(egui::RichText::new(format!("Exporting… {}", pct(fraction))).color(TEXT_2));
+                            ui.add_space(6.0);
+                            let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), Sense::hover());
+                            ui.painter().rect_filled(bar, CornerRadius::same(3), TRACK);
+                            let done = Rect::from_min_size(bar.min, egui::vec2(bar.width() * fraction.clamp(0.02, 1.0), bar.height()));
+                            ui.painter().rect_filled(done, CornerRadius::same(3), ACCENT);
+                        }
+                        None if !has_uvs => {
+                            ui.label(egui::RichText::new("This model has no UVs yet, so its maps wouldn't line up. Unwrap it in the UV workspace first.").color(WARN));
+                        }
+                        None => {
+                            let label = if plan.is_some() { "Export" } else { "Choose folder and export" };
+                            go = widgets::button_full(ui, label, true, 40.0).clicked();
+                            if let Some((msg, at)) = &self.last_export {
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new(format!("{} {}", ago(self.now - at), msg)).color(TEXT_3));
+                            }
+                        }
+                    }
+                    if choose && self.pick_export_dir().is_some() {
+                        // A new folder is a new place; the last export's note belongs to the old one.
+                        self.last_export = None;
+                    }
+                    if go {
+                        self.export_to_godot();
+                    }
+                });
+            });
+        });
+    }
+
     fn open_path(&mut self, path: &Path, now: f64) {
         match mesh::load(path) {
             Ok(mesh) => {
                 // A model without UVs gets the unwrap card instead.
                 let note = mesh.has_uvs.then(|| format!("Opened {} · {} triangles", mesh.name, fmt_count(mesh.triangle_count())));
                 self.set_mesh(mesh);
+                self.model_path = Some(path.to_owned());
+                self.last_export = None;
                 self.toast = note.map(|n| (n, now));
             }
             Err(e) => {
@@ -489,6 +711,9 @@ impl UmberApp {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.open_dialog(now);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
+            self.export_to_godot();
         }
         // Only typing in a text field blocks shortcuts. Any clicked button or slider also
         // holds egui focus, and must not swallow Ctrl+Z or the tool keys.
@@ -592,8 +817,17 @@ impl UmberApp {
         });
 
         ui.scope_builder(UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
-            if widgets::button(ui, "Export to Godot", true, 34.0).clicked() {
-                self.workspace = Workspace::Export;
+            let exporting = self.export_job.as_ref().map(|j| j.done.load(Ordering::Relaxed) as f32 / export::total_steps(&j.plan) as f32);
+            let label = match exporting {
+                Some(f) => format!("Exporting {}", pct(f)),
+                None => "Export to Godot".to_owned(),
+            };
+            let tip = match &self.export_dir {
+                Some(dir) => format!("Export again to {} (Ctrl+E)", home_relative(dir)),
+                None => "Write a .glb, a Godot material and its maps (Ctrl+E)".to_owned(),
+            };
+            if widgets::button(ui, &label, exporting.is_none(), 34.0).on_hover_text(tip).clicked() && exporting.is_none() {
+                self.export_to_godot();
             }
             ui.add_space(4.0);
             if widgets::icon_action(ui, icons::REDO, self.history.can_redo(), 36.0, "Redo (Ctrl+Shift+Z)").clicked() {
@@ -1709,11 +1943,7 @@ impl UmberApp {
     fn workspace_placard(&mut self, ctx: &egui::Context, vp: Rect) {
         let (title, body) = match self.workspace {
             Workspace::Materials => ("Material graph", "The node-based PBR editor comes after the paint loop works end to end."),
-            Workspace::Export => (
-                "Export",
-                "Godot export (.glb + StandardMaterial3D .tres, ORM-packed maps) is the last step of milestone 1.",
-            ),
-            Workspace::Paint | Workspace::Uv => return,
+            Workspace::Paint | Workspace::Uv | Workspace::Export => return,
         };
         egui::Area::new(egui::Id::unique("placard"))
             .order(Order::Foreground)
@@ -1760,6 +1990,7 @@ impl eframe::App for UmberApp {
         self.now = now;
         self.handle_shortcuts(&ctx, now);
         self.poll_unwrap(&ctx);
+        self.poll_export(&ctx);
 
         egui::Panel::top("top_bar")
             .exact_size(52.0)
@@ -1778,6 +2009,8 @@ impl eframe::App for UmberApp {
         }
         if self.workspace == Workspace::Uv {
             self.uv_panel(&ctx, vp);
+        } else if self.workspace == Workspace::Export {
+            self.export_panel(&ctx, vp);
         } else {
             self.layers_panel(&ctx, vp);
         }
@@ -1835,6 +2068,25 @@ fn labelled_slider(
 /// A quiet line of help text in a bar.
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).color(TEXT_3).size(12.0));
+}
+
+/// A path with the home folder shown as ~.
+fn home_relative(path: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if path.starts_with(&home) && path != home => {
+            format!("~/{}", path.strip_prefix(&home).unwrap_or(path).display())
+        }
+        _ => path.display().to_string(),
+    }
+}
+
+/// "Just now", "2 min ago", for the line under a button that has done its thing.
+fn ago(seconds: f64) -> String {
+    match seconds {
+        s if s < 60.0 => "Just now.".to_owned(),
+        s if s < 3600.0 => format!("{} min ago.", (s / 60.0) as u32),
+        s => format!("{} h ago.", (s / 3600.0) as u32),
+    }
 }
 
 fn pct(v: f32) -> String {

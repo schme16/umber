@@ -318,7 +318,7 @@ impl TextureSet {
         &self.outputs.normal_view
     }
 
-    #[allow(dead_code)] // Export (M1.6) reads these back.
+    /// Colour (sRGB bytes), material (rough, metal, height, AO as half floats) and normal.
     pub fn output_textures(&self) -> [&wgpu::Texture; 3] {
         [&self.outputs.color, &self.outputs.mat, &self.outputs.normal]
     }
@@ -1099,6 +1099,37 @@ pub fn read_texel(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Textur
     buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
     device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
     buffer.slice(..).get_mapped_range().expect("mapped")[..bpp as usize].to_vec()
+}
+
+/// Read a whole mip level back as tightly packed rows. Returns its width (the maps are square).
+pub fn read_level(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture, level: u32, bpp: u32) -> (u32, Vec<u8>) {
+    let size = (tex.width() >> level).max(1);
+    let row = size * bpp;
+    let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("read level"),
+        size: padded as u64 * size as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture: tex, mip_level: level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(size) },
+        },
+        wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+    );
+    queue.submit([enc.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    let mapped = buffer.slice(..).get_mapped_range().expect("mapped");
+    let mut out = Vec::with_capacity((row * size) as usize);
+    for y in 0..size as usize {
+        out.extend_from_slice(&mapped[y * padded as usize..y * padded as usize + row as usize]);
+    }
+    (size, out)
 }
 
 /// A half float's bits as f32.

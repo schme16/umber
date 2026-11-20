@@ -26,7 +26,7 @@
 | GPU | wgpu 30 (Vulkan on Linux) | Portable to DX12/Metal later; compute shaders for painting |
 | UI | egui 0.37 via eframe, custom-painted Graphite widgets | Immediate mode suits a tool app; full control of look |
 | Pen input | Own XInput2 backend (x11rb) | winit and octotablet give no pressure on X11 |
-| Import | gltf, tobj, ufbx (planned) | Permissive, cover glTF/GLB, OBJ, FBX |
+| Import | gltf, tobj, ufbx | Permissive, cover glTF/GLB, OBJ, FBX |
 | Unwrap | xatlas (MIT) for auto-unwrap and packing; own LSCM for seam-based unwrap | xatlas is proven; LSCM gives seam control |
 | Export | glTF/GLB writer + Godot `.tres` StandardMaterial3D | Godot imports glTF natively |
 
@@ -34,7 +34,8 @@
 
 - `src/app.rs`: app state and the Graphite shell (top bar, viewport, floating panels)
 - `src/renderer.rs` + `src/shaders/viewport.wgsl`: offscreen MSAA viewport, GGX lighting, view modes
-- `src/mesh.rs`: mesh data, glTF/OBJ import, built-in shapes
+- `src/mesh.rs`: mesh data, glTF/OBJ/FBX import, built-in shapes
+- `src/export.rs`: Godot export (GLB writer, ORMMaterial3D `.tres`, map readback and PNGs)
 - `src/camera.rs`: orbit camera
 - `src/theme.rs`, `src/widgets.rs`, `src/icons.rs`: the Graphite design system
 - `src/pen.rs`: XInput2 pen pressure/tilt thread (raw events on the root window) and the pressure curve
@@ -89,8 +90,17 @@ with the pen, see it lit, export to Godot.
    the back as its own island so it never shares paint with the front), **Box**, **Cylinder**
    (with flat caps) and **Sphere**. They pack through xatlas too, so each lands in the square
    without overlaps, and the paint moves with them the same way.
-6. **Export.** GLB with embedded PBR maps, plus a Godot `.tres` StandardMaterial3D
-   pointing at ORM-packed PNGs. FBX import via ufbx.
+6. **Export.** Done 2026-11-20. **Export to Godot** (Ctrl+E) asks for a folder once, then
+   exports in one click: a `.glb` with albedo, ORM and normal maps embedded (no tangents, so
+   Godot generates MikkTSpace ones), and per material the same maps as PNGs plus an
+   `ORMMaterial3D` `.tres`. Inside a Godot project the `.tres` uses `res://` paths, and the GLB
+   names its images so Godot's importer lands on the PNGs already there instead of extracting
+   second copies. Maps at 2048, 1024 or 512 px (smaller ones come from the maps' mips); PNGs
+   encode in parallel on a worker thread and each file is renamed into place, so Godot never
+   imports half a file. The Export workspace shows the folder (as `res://` when in a project),
+   the size and every file it writes. FBX import via ufbx: binary and ASCII, converted to Y-up
+   metres, Blender's Phong-encoded PBR values read back, textures found embedded, at their
+   path or beside the model.
 
 ## Later milestones
 

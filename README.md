@@ -32,10 +32,17 @@ Linux only for now. You need a Vulkan driver.
 | Brush size | | [ and ] |
 | Swap colours | | X |
 | Undo, redo | | Ctrl+Z, Ctrl+Shift+Z |
+| Export to Godot | **Export to Godot** (asks for a folder the first time) | Ctrl+E |
 
 ## Formats
 
-Opens .glb, .gltf and .obj today. FBX import (via ufbx) is planned for milestone 1.
+Opens .glb, .gltf, .obj and .fbx (binary or ASCII, read with ufbx; Z-up and centimetre files
+come in Y-up and in metres).
+
+**Export to Godot** writes a `.glb` with the painted maps inside, and beside it, for each
+material, the same maps as PNGs (albedo, ORM and normal) and an `ORMMaterial3D` `.tres` that
+points at them. Export into a folder inside your Godot project and Godot's importer uses those
+PNGs for the model too, so there's one copy of each map. Maps are 2048, 1024 or 512 px.
 
 ## Licence
 
