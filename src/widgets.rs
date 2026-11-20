@@ -118,28 +118,6 @@ pub fn button_width(ctx: &egui::Context, label: &str) -> f32 {
     ctx.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), theme::semibold(13.0), TEXT).size().x) + 32.0
 }
 
-/// An icon with a word beside it, for a control that has to be found at a glance. `selected`
-/// fills it with the accent, like [`icon_button`].
-pub fn icon_label_button(ui: &mut Ui, icon: char, label: &str, selected: bool, height: f32, tooltip: &str) -> Response {
-    let font = theme::medium(13.0);
-    let text_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), TEXT).size().x);
-    let icon_size = height * 0.42;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0 + icon_size + 7.0 + text_w + 14.0, height), Sense::click());
-    let painter = ui.painter_at(rect.expand(1.0));
-    let (bg, fg, icon_fg) = if selected {
-        (ACCENT, ON_ACCENT, ON_ACCENT)
-    } else if response.hovered() {
-        (RAISED, TEXT, TEXT)
-    } else {
-        (Color32::TRANSPARENT, TEXT_2, ICON)
-    };
-    painter.rect_filled(rect, CornerRadius::same(10), bg);
-    let icon_c = egui::pos2(rect.left() + 12.0 + icon_size * 0.5, rect.center().y);
-    painter.text(icon_c, Align2::CENTER_CENTER, icon, theme::icon_font(icon_size), icon_fg);
-    painter.text(egui::pos2(icon_c.x + icon_size * 0.5 + 7.0, rect.center().y), Align2::LEFT_CENTER, label, font, fg);
-    response.on_hover_text(tooltip)
-}
-
 /// Plain push button. `primary` uses the accent fill.
 pub fn button(ui: &mut Ui, label: &str, primary: bool, height: f32) -> Response {
     let width = button_width(ui.ctx(), label);
