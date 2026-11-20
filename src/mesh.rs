@@ -167,6 +167,66 @@ impl Mesh {
         }
         self.indices.chunks_exact(3).map(|idx| find(&mut parent, corner[idx[0] as usize])).collect()
     }
+
+    /// A face number for every triangle, the way a person would see faces: neighbouring
+    /// triangles (sharing an edge in space, whatever their UVs) are one face when they bend
+    /// less than `edge_degrees` from each other. A shallow curve stays one face; a box corner
+    /// starts another.
+    pub fn faces(&self, edge_degrees: f32) -> Vec<u32> {
+        use std::collections::HashMap;
+        let mut welded: HashMap<[u32; 3], u32> = HashMap::new();
+        let corner: Vec<u32> = self
+            .vertices
+            .iter()
+            .map(|v| {
+                let next = welded.len() as u32;
+                *welded.entry(v.pos.map(f32::to_bits)).or_insert(next)
+            })
+            .collect();
+        let tris = self.triangle_count();
+        let normals: Vec<Vec3> = self
+            .indices
+            .chunks_exact(3)
+            .map(|t| {
+                let p = |i: u32| Vec3::from(self.vertices[i as usize].pos);
+                (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).normalize_or_zero()
+            })
+            .collect();
+        let mut by_edge: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        for (t, idx) in self.indices.chunks_exact(3).enumerate() {
+            for k in 0..3 {
+                let (a, b) = (corner[idx[k] as usize], corner[idx[(k + 1) % 3] as usize]);
+                if a != b {
+                    by_edge.entry((a.min(b), a.max(b))).or_default().push(t as u32);
+                }
+            }
+        }
+        let mut parent: Vec<u32> = (0..tris as u32).collect();
+        fn find(parent: &mut [u32], mut x: u32) -> u32 {
+            while parent[x as usize] != x {
+                parent[x as usize] = parent[parent[x as usize] as usize];
+                x = parent[x as usize];
+            }
+            x
+        }
+        let min_dot = edge_degrees.to_radians().cos();
+        for list in by_edge.values() {
+            for (i, &a) in list.iter().enumerate() {
+                for &b in &list[i + 1..] {
+                    let (na, nb) = (normals[a as usize], normals[b as usize]);
+                    // A sliver with no direction joins whatever it touches.
+                    let joined = na == Vec3::ZERO || nb == Vec3::ZERO || na.dot(nb) >= min_dot;
+                    if joined {
+                        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                        if ra != rb {
+                            parent[rb as usize] = ra;
+                        }
+                    }
+                }
+            }
+        }
+        (0..tris as u32).map(|t| find(&mut parent, t)).collect()
+    }
 }
 
 /// Where a ray met the mesh.
@@ -658,6 +718,37 @@ fn builtin(name: &str, mut vertices: Vec<Vertex>, indices: Vec<u32>) -> Mesh {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn faces_split_at_corners_and_follow_shallow_curves() {
+        let cube = super::cube();
+        let faces = cube.faces(40.0);
+        let mut distinct = faces.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 6, "a cube has six faces");
+        // A strip bent 10 degrees at each of five folds is one face; at 60 it would be three.
+        let mut verts = Vec::new();
+        let mut idx = Vec::new();
+        let (mut x, mut z, mut angle) = (0.0f32, 0.0f32, 0.0f32);
+        for i in 0..6 {
+            for y in [0.0, 1.0] {
+                verts.push(Vertex { pos: [x, y, z], normal: [0.0, 0.0, 1.0], uv: [i as f32 / 5.0, y], tangent: [1.0, 0.0, 0.0, 1.0] });
+            }
+            x += angle.to_radians().cos();
+            z -= angle.to_radians().sin();
+            angle += 10.0;
+            if i > 0 {
+                let b = (i as u32 - 1) * 2;
+                idx.extend_from_slice(&[b, b + 2, b + 3, b, b + 3, b + 1]);
+            }
+        }
+        let n = idx.len() as u32;
+        let strip = Mesh { name: "strip".into(), vertices: verts, indices: idx, submeshes: vec![Submesh { index_start: 0, index_count: n, material: 0 }], has_uvs: true, materials: vec![Material::named("m")] };
+        let f = strip.faces(40.0);
+        assert!(f.iter().all(|&v| v == f[0]), "a shallow curve is one face");
+        assert!(strip.faces(5.0).iter().any(|&v| v != f[0]), "a tight edge angle splits it");
+    }
     use super::*;
 
     /// A Z-up quad in metres with one material, as Blender or Maya might write it in ASCII.

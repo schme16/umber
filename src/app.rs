@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 
-use eframe::egui_wgpu;
+use eframe::egui_wgpu::{self, wgpu};
 use eframe::egui_wgpu::wgpu::util::DeviceExt;
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
 
@@ -136,6 +136,17 @@ impl Tool {
     }
 }
 
+/// What a stroke or fill can reach.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Reach {
+    /// Everything under the brush (for fills, the UV island).
+    #[default]
+    All,
+    /// Only the face the stroke starts on: triangles that bend less than the edge angle from
+    /// their neighbours.
+    Face,
+}
+
 /// Dabs sit this fraction of the brush's diameter apart.
 const SPACING: f32 = 0.1;
 /// Seconds of no editing before unsaved work is copied to the recovery folder...
@@ -175,6 +186,10 @@ struct BrushSettings {
     texture_scale: f32,
     /// Degrees.
     texture_turn: f32,
+    stroke_reach: Reach,
+    fill_reach: Reach,
+    /// Neighbouring triangles that bend more than this many degrees are different faces.
+    edge_angle: f32,
 }
 
 impl Default for BrushSettings {
@@ -200,6 +215,9 @@ impl Default for BrushSettings {
             projection: Projection::Surface,
             texture_scale: 1.0,
             texture_turn: 0.0,
+            stroke_reach: Reach::All,
+            fill_reach: Reach::All,
+            edge_angle: 40.0,
         }
     }
 }
@@ -216,6 +234,10 @@ struct StrokeState {
     next: f32,
     /// Pen pressure (after the curve) at `last`.
     pressure: f32,
+    /// The triangles this stroke may paint, when it keeps to one face.
+    only: Option<(wgpu::Buffer, u32)>,
+    /// Keeping to one face, but the stroke hasn't touched the model yet.
+    finding_face: bool,
 }
 
 /// An unwrap or repack running on a worker thread.
@@ -290,6 +312,8 @@ pub struct UmberApp {
     stroke: Option<StrokeState>,
     /// UV island of every triangle, worked out the first time the fill tool needs it.
     islands: Option<Vec<u32>>,
+    /// Face of every triangle, for the edge angle it was worked out at.
+    faces: Option<(f32, Vec<u32>)>,
     /// One texture set per mesh material.
     sets: Vec<TextureSet>,
     /// The set the layers panel shows and the brush paints.
@@ -387,6 +411,7 @@ impl UmberApp {
             thumbs_generation: 0,
             stroke: None,
             islands: None,
+            faces: None,
             sets: Vec::new(),
             active_set: 0,
             history: History::default(),
@@ -479,6 +504,7 @@ impl UmberApp {
             }
         }
         self.islands = None;
+        self.faces = None;
         self.uv_health = None;
         self.mesh_generation += 1;
     }
@@ -1237,6 +1263,8 @@ impl UmberApp {
             Cmd::PaintMetal => b.paint_metal,
             Cmd::PaintHeight => b.paint_height,
             Cmd::BrushTexture => b.use_texture,
+            Cmd::ReachAll => b.stroke_reach == Reach::All,
+            Cmd::ReachFace => b.stroke_reach == Reach::Face,
             _ => return None,
         })
     }
@@ -1273,6 +1301,8 @@ impl UmberApp {
                 self.sync_brush_texture();
             }
             Cmd::OpenBrushTexture => self.open_brush_texture(),
+            Cmd::ReachAll => self.brush.stroke_reach = Reach::All,
+            Cmd::ReachFace => self.brush.stroke_reach = Reach::Face,
             Cmd::PenSettings => {
                 // The curve lives in the brush bar, which shows for the painting tools.
                 self.workspace = Workspace::Paint;
@@ -1847,8 +1877,52 @@ impl UmberApp {
         }
         self.brush_engine.begin(&self.rs.device, &self.rs.queue, target);
         let pressure = self.pressure();
-        self.stroke = Some(StrokeState { set, mask, paint, last: pos, next: 0.0, pressure });
+        let one_face = self.brush.stroke_reach == Reach::Face;
+        let only = if one_face { self.pick(pos, rect).and_then(|hit| self.face_triangles(hit.triangle, set)) } else { None };
+        let finding_face = one_face && only.is_none();
+        self.stroke = Some(StrokeState { set, mask, paint, last: pos, next: 0.0, pressure, only, finding_face });
         true
+    }
+
+    /// An index buffer of the triangles in `set` on the same face as `triangle`, and its
+    /// index count.
+    fn face_triangles(&mut self, triangle: usize, set: usize) -> Option<(wgpu::Buffer, u32)> {
+        let mesh = self.mesh.as_ref()?;
+        let draw = self.renderer.mesh_draw(set)?;
+        Self::face_index_buffer(mesh, &mut self.faces, self.brush.edge_angle, triangle, &draw.ranges, &self.rs.device)
+    }
+
+    /// [`Self::face_triangles`] for callers already holding the mesh and its draw ranges.
+    fn face_index_buffer(
+        mesh: &Mesh,
+        cache: &mut Option<(f32, Vec<u32>)>,
+        angle: f32,
+        triangle: usize,
+        ranges: &[std::ops::Range<u32>],
+        device: &wgpu::Device,
+    ) -> Option<(wgpu::Buffer, u32)> {
+        if cache.as_ref().is_none_or(|(a, _)| *a != angle) {
+            *cache = Some((angle, mesh.faces(angle)));
+        }
+        let faces = &cache.as_ref()?.1;
+        let face = *faces.get(triangle)?;
+        let mut indices = Vec::new();
+        for r in ranges {
+            for tri in (r.start / 3)..(r.end / 3) {
+                if faces[tri as usize] == face {
+                    indices.extend_from_slice(&mesh.indices[tri as usize * 3..tri as usize * 3 + 3]);
+                }
+            }
+        }
+        if indices.is_empty() {
+            return None;
+        }
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("one face"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Some((buffer, indices.len() as u32))
     }
 
     /// Pen pressure through the curve, or full pressure for a mouse.
@@ -1859,6 +1933,15 @@ impl UmberApp {
 
     /// Lay dabs along the pointer's path since last frame.
     fn stroke_frame(&mut self, points: &[Pos2], rect: Rect, ppp: f32, cam: &brush::View) {
+        // Keeping to one face: the first point that lands on the model chooses it, and until
+        // then nothing is painted.
+        if let Some((true, set)) = self.stroke.as_ref().map(|st| (st.finding_face, st.set)) {
+            let found = points.iter().find_map(|p| self.pick(*p, rect)).and_then(|hit| self.face_triangles(hit.triangle, set));
+            if let (Some(only), Some(st)) = (found, self.stroke.as_mut()) {
+                st.only = Some(only);
+                st.finding_face = false;
+            }
+        }
         let pen = self.pen.status();
         let (axis, squash) = self.tilt_shape(&pen);
         let p1 = self.pressure();
@@ -1905,11 +1988,13 @@ impl UmberApp {
         }
         st.last = from;
         st.pressure = p1;
-        if dabs.is_empty() {
+        if dabs.is_empty() || st.finding_face {
             return;
         }
         let (set, paint) = (st.set, st.paint);
-        if let Some(draw) = self.renderer.mesh_draw(set) {
+        let only = st.only.as_ref().map(|(b, n)| (b, *n));
+        if let Some(mut draw) = self.renderer.mesh_draw(set) {
+            draw.only = only;
             self.brush_engine.paint(&self.rs.device, &self.rs.queue, &draw, cam, &paint, &dabs);
             self.sets[set].dirty = true;
         }
@@ -1940,7 +2025,13 @@ impl UmberApp {
         let (device, queue) = (&self.rs.device, &self.rs.queue);
 
         let island_buffer;
+        let face_buffer;
         let draw = if whole {
+            draw
+        } else if self.brush.fill_reach == Reach::Face {
+            let mut draw = draw;
+            face_buffer = Self::face_index_buffer(mesh, &mut self.faces, self.brush.edge_angle, hit.triangle, &draw.ranges, device);
+            draw.only = face_buffer.as_ref().map(|(b, n)| (b, *n));
             draw
         } else {
             let islands = self.islands.get_or_insert_with(|| mesh.uv_islands());
@@ -1962,7 +2053,7 @@ impl UmberApp {
                 },
             );
             #[allow(clippy::single_range_in_vec_init)] // One range, in a list of them.
-            brush::MeshDraw { vertices: draw.vertices, indices: &island_buffer, ranges: vec![0..indices.len() as u32] }
+            brush::MeshDraw { vertices: draw.vertices, indices: &island_buffer, ranges: vec![0..indices.len() as u32], only: None }
         };
         let Some(pixels) = self.sets[set].selected_layer().and_then(|l| l.pixels.as_deref()) else { return };
         self.brush_engine.begin(device, queue, brush::Target::Layer(pixels));
@@ -2175,7 +2266,7 @@ impl UmberApp {
         egui::Area::new(egui::Id::unique("brush_bar")).order(Order::Foreground).fixed_pos(vp.min + egui::vec2(92.0, 16.0)).show(ctx, |ui| {
             theme::panel_frame().inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
                 // One row when it fits, otherwise the pen and channel toggles drop to a second row.
-                let one_row = max_w >= 1360.0;
+                let one_row = max_w >= 1640.0;
                 ui.spacing_mut().item_spacing = egui::vec2(10.0, 8.0);
                 let strokes = self.tool.strokes();
                 ui.horizontal(|ui| {
@@ -2197,7 +2288,9 @@ impl UmberApp {
                             widgets::vdivider(ui, 24.0);
                             self.channel_toggles(ui);
                             widgets::vdivider(ui, 24.0);
-                            hint(ui, "Click fills a UV island · Shift+click fills the whole material");
+                            self.reach_controls(ui, true);
+                            widgets::vdivider(ui, 24.0);
+                            hint(ui, "Shift+click fills the whole material");
                         }
                         Tool::Picker => hint(ui, "Click the model to pick up its colour and material"),
                         _ => hint(ui, "Comes later, with smart layers"),
@@ -2236,6 +2329,25 @@ impl UmberApp {
             hint(ui, "Dark hides the layer, light shows it");
         } else {
             self.channel_toggles(ui);
+        }
+        widgets::vdivider(ui, 24.0);
+        self.reach_controls(ui, false);
+    }
+
+    /// Whether strokes (or fills) reach everything under them or keep to one face.
+    fn reach_controls(&mut self, ui: &mut egui::Ui, fill: bool) {
+        widgets::caps_label(ui, if fill { "Fills" } else { "Paints on" });
+        let b = &mut self.brush;
+        let (reach, options) = if fill {
+            (&mut b.fill_reach, [(Reach::All, "UV island"), (Reach::Face, "One face")])
+        } else {
+            (&mut b.stroke_reach, [(Reach::All, "Everything"), (Reach::Face, "One face")])
+        };
+        widgets::segmented(ui, reach, &options, 30.0);
+        if *reach == Reach::Face {
+            ui.scope(|ui| slider_with_value(ui, "Edge", &mut b.edge_angle, 5.0..=90.0, 64.0, |v| format!("{v:.0}°")))
+                .response
+                .on_hover_text("Where one face ends: a bend sharper than this. Lower keeps to flatter parts; higher follows rounder ones");
         }
     }
 

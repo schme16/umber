@@ -85,6 +85,9 @@ pub struct MeshDraw<'a> {
     pub vertices: &'a wgpu::Buffer,
     pub indices: &'a wgpu::Buffer,
     pub ranges: Vec<Range<u32>>,
+    /// Paint only these triangles (an index buffer and its index count). The whole mesh still
+    /// hides what's behind it.
+    pub only: Option<(&'a wgpu::Buffer, u32)>,
 }
 
 /// What a stroke paints into.
@@ -454,9 +457,17 @@ impl BrushEngine {
                 pass.set_pipeline(if active.mask { &self.mask_pipeline } else { &self.layer_pipeline });
                 pass.set_bind_group(0, &bg, &[]);
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for range in &mesh.ranges {
-                    pass.draw_indexed(range.clone(), 0, 0..1);
+                match mesh.only {
+                    Some((only, count)) => {
+                        pass.set_index_buffer(only.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..count, 0, 0..1);
+                    }
+                    None => {
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        for range in &mesh.ranges {
+                            pass.draw_indexed(range.clone(), 0, 0..1);
+                        }
+                    }
                 }
             }
             queue.submit([enc.finish()]);
@@ -583,7 +594,7 @@ mod tests {
     fn dab_paints_where_the_camera_looks_and_undo_restores() {
         let (device, queue) = gpu();
         let (vb, ib, view) = quad(&device);
-        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
+        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6], only: None };
         let pixels = texset::PaintPixels::new(&device);
         let mut brush = BrushEngine::new(&device, &queue);
         brush.begin(&device, &queue, Target::Layer(&pixels));
@@ -606,7 +617,7 @@ mod tests {
     fn opacity_caps_overlapping_dabs_and_erase_removes() {
         let (device, queue) = gpu();
         let (vb, ib, view) = quad(&device);
-        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
+        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6], only: None };
         let pixels = texset::PaintPixels::new(&device);
         let mut brush = BrushEngine::new(&device, &queue);
         let mid = SIZE / 2;
@@ -632,7 +643,7 @@ mod tests {
     fn texture_paints_its_colours_and_skips_see_through_parts() {
         let (device, queue) = gpu();
         let (vb, ib, view) = quad(&device);
-        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
+        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6], only: None };
         // 8 x 8: the left half opaque red, the right half see-through blue.
         let mut rgba = Vec::new();
         for _ in 0..8 {
@@ -661,6 +672,27 @@ mod tests {
     }
 
     #[test]
+    fn only_the_chosen_triangles_are_painted() {
+        let (device, queue) = gpu();
+        let (vb, ib, view) = quad(&device);
+        // The first of the quad's two triangles: below the diagonal from (-1,-1) to (1,1).
+        let first = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[0u32, 1, 2]),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6], only: Some((&first, 3)) };
+        let pixels = texset::PaintPixels::new(&device);
+        let mut brush = BrushEngine::new(&device, &queue);
+        brush.begin(&device, &queue, Target::Layer(&pixels));
+        let dab = Dab { center: [128.0, 128.0], axis: [1.0, 0.0], radius: 400.0, squash: 1.0, strength: 1.0, flow: 1.0 };
+        brush.paint(&device, &queue, &mesh, &view, &paint(), &[dab]);
+        assert_eq!(read_texel(&device, &queue, &pixels.color, SIZE * 3 / 4, SIZE * 3 / 4, 4)[3], 255, "chosen triangle painted");
+        assert_eq!(read_texel(&device, &queue, &pixels.color, SIZE / 4, SIZE / 4, 4)[3], 0, "the other one left alone");
+        brush.end(&device, &queue);
+    }
+
+    #[test]
     fn hidden_surfaces_are_not_painted() {
         let (device, queue) = gpu();
         let (_, _, view) = quad(&device);
@@ -671,7 +703,7 @@ mod tests {
         let idx: [u32; 12] = [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
         let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX });
         let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&idx), usage: wgpu::BufferUsages::INDEX });
-        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
+        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6], only: None };
         let pixels = texset::PaintPixels::new(&device);
         let mut brush = BrushEngine::new(&device, &queue);
         brush.begin(&device, &queue, Target::Layer(&pixels));

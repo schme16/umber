@@ -228,7 +228,7 @@ impl ViewportRenderer {
     pub fn mesh_draw(&self, set: usize) -> Option<crate::brush::MeshDraw<'_>> {
         let mesh = self.mesh.as_ref()?;
         let ranges = mesh.submeshes.iter().filter(|(_, m)| *m == set).map(|(r, _)| r.clone()).collect();
-        Some(crate::brush::MeshDraw { vertices: &mesh.vertex, indices: &mesh.index, ranges })
+        Some(crate::brush::MeshDraw { vertices: &mesh.vertex, indices: &mesh.index, ranges, only: None })
     }
 
     /// Render one frame at `size` physical pixels and return the egui texture showing it.
