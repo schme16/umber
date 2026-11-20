@@ -3345,6 +3345,7 @@ dependencies = [
  "image",
  "log",
  "pollster",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

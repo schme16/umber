@@ -207,3 +207,9 @@ pub fn pressure_curve(ui: &mut Ui, size: egui::Vec2, curve: &crate::pen::Pressur
     }
     response
 }
+
+/// Pressed or clicked: for choosing a tool or option, which is safe to do on the press. A pen
+/// tap often slides more than egui allows for a click, and this still lands.
+pub fn tapped(response: &Response) -> bool {
+    response.clicked() || (response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed()))
+}

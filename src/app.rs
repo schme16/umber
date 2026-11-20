@@ -11,7 +11,9 @@ use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Re
 
 use crate::brush::{self, BrushEngine, Dab};
 use crate::camera::OrbitCamera;
+use crate::commands::{self, Cmd};
 use crate::export;
+use crate::help::{self, Tip};
 use glam::Vec3;
 use crate::history::{Applied, Change, History};
 use crate::mesh::{self, Mesh};
@@ -26,8 +28,8 @@ use crate::{icons, widgets};
 /// Overlapping texels on the UV coverage map, and numbers worth a second look.
 const WARN: Color32 = Color32::from_rgb(0xe0, 0x7d, 0x62);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Workspace {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Workspace {
     Paint,
     Uv,
     Materials,
@@ -35,8 +37,8 @@ enum Workspace {
 }
 
 /// How the UV panel lays a model out. Each maps to an [`unwrap::Mode`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UnwrapMethod {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum UnwrapMethod {
     Auto,
     Planar,
     Box,
@@ -45,7 +47,7 @@ enum UnwrapMethod {
 }
 
 impl UnwrapMethod {
-    const ALL: [(UnwrapMethod, &'static str); 5] = [
+    pub(crate) const ALL: [(UnwrapMethod, &'static str); 5] = [
         (UnwrapMethod::Auto, "Auto"),
         (UnwrapMethod::Planar, "Planar"),
         (UnwrapMethod::Box, "Box"),
@@ -84,8 +86,8 @@ impl UnwrapAxis {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tool {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tool {
     Brush,
     Eraser,
     Smudge,
@@ -97,7 +99,7 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Tool; 8] =
+    pub(crate) const ALL: [Tool; 8] =
         [Tool::Brush, Tool::Eraser, Tool::Smudge, Tool::Fill, Tool::Clone, Tool::Decal, Tool::Mask, Tool::Picker];
 
     fn icon(self) -> char {
@@ -113,31 +115,9 @@ impl Tool {
         }
     }
 
+    /// From the command registry, so the rail, the brush bar and the palette agree.
     fn name(self) -> &'static str {
-        match self {
-            Tool::Brush => "Brush",
-            Tool::Eraser => "Eraser",
-            Tool::Smudge => "Smudge",
-            Tool::Fill => "Fill",
-            Tool::Clone => "Clone stamp",
-            Tool::Decal => "Decal",
-            Tool::Mask => "Mask",
-            Tool::Picker => "Colour picker",
-        }
-    }
-
-    fn key(self) -> egui::Key {
-        use egui::Key;
-        match self {
-            Tool::Brush => Key::B,
-            Tool::Eraser => Key::E,
-            Tool::Smudge => Key::S,
-            Tool::Fill => Key::G,
-            Tool::Clone => Key::C,
-            Tool::Decal => Key::D,
-            Tool::Mask => Key::M,
-            Tool::Picker => Key::I,
-        }
+        commands::get(Cmd::Tool(self)).name
     }
 
     fn shows_brush_cursor(self) -> bool {
@@ -258,6 +238,7 @@ enum Pending {
 }
 
 enum LayerAction {
+    AddMask,
     Up,
     Down,
     Duplicate,
@@ -343,6 +324,14 @@ pub struct UmberApp {
     closing: bool,
     /// The window title as last set.
     title: String,
+    /// Umber's own window, so file pickers open on top of it rather than behind.
+    parent: Option<Parent>,
+
+    palette: help::Palette,
+    shortcuts_open: bool,
+    /// Space is down: a left drag turns the model.
+    space_held: bool,
+    tips: help::Tips,
 }
 
 impl UmberApp {
@@ -406,6 +395,11 @@ impl UmberApp {
             pending: None,
             closing: false,
             title: String::new(),
+            parent: None,
+            palette: help::Palette::default(),
+            shortcuts_open: false,
+            space_held: false,
+            tips: help::Tips::load(),
         };
         project::sweep_recovery_dir();
         if let Some(path) = initial_file {
@@ -597,7 +591,7 @@ impl UmberApp {
 
     fn pick_export_dir(&mut self) -> Option<PathBuf> {
         let start = self.export_dir.clone().or_else(|| self.model_path.as_ref().and_then(|p| p.parent().map(Path::to_owned)));
-        let mut dialog = rfd::FileDialog::new().set_title("Export to which folder? One inside your Godot project works best");
+        let mut dialog = self.dialog().set_title("Export to which folder? One inside your Godot project works best");
         if let Some(start) = start {
             dialog = dialog.set_directory(start);
         }
@@ -768,7 +762,7 @@ impl UmberApp {
     fn open_dialog(&mut self) {
         let mut extensions = vec![project::EXTENSION];
         extensions.extend_from_slice(mesh::SUPPORTED_EXTENSIONS);
-        let picked = rfd::FileDialog::new()
+        let picked = self.dialog()
             .set_title("Open a model or project")
             .add_filter("Models and Umber projects", &extensions)
             .pick_file();
@@ -950,7 +944,7 @@ impl UmberApp {
             None => format!("{}.{}", self.work_name(), project::EXTENSION),
         };
         let dir = self.project_path.as_ref().or(self.model_path.as_ref()).and_then(|p| p.parent());
-        let mut dialog = rfd::FileDialog::new().set_title("Save project").add_filter("Umber project", &[project::EXTENSION]).set_file_name(name);
+        let mut dialog = self.dialog().set_title("Save project").add_filter("Umber project", &[project::EXTENSION]).set_file_name(name);
         if let Some(dir) = dir {
             dialog = dialog.set_directory(dir);
         }
@@ -1136,65 +1130,216 @@ impl UmberApp {
         if let Some(path) = dropped.first() {
             self.open_path(path);
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
-            self.open_dialog();
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
-            // Goes through handle_close like the window's close button.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-        // Save as first: Ctrl+S also matches Ctrl+Shift+S.
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S)) {
-            self.save(true);
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            self.save(false);
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
-            self.export_to_godot();
-        }
-        // Only typing in a text field blocks shortcuts. Any clicked button or slider also
-        // holds egui focus, and must not swallow Ctrl+Z or the tool keys.
-        if ctx.text_edit_focused() {
-            return;
-        }
-        // Redo first: Ctrl+Z also matches Ctrl+Shift+Z.
-        let (redo, undo) = ctx.input_mut(|i| {
-            let redo = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
-                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
-            (redo, i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z))
+        // Every key comes from the command registry. Only typing in a text field holds back the
+        // plain keys and undo (the field has its own); a clicked button or slider also holds
+        // egui focus, and must not swallow them.
+        let typing = ctx.text_edit_focused();
+        // Space is held for navigation, never sent on to the focused button (egui presses it).
+        self.space_held = !typing && ctx.input_mut(|i| {
+            while i.consume_key(egui::Modifiers::NONE, egui::Key::Space) {}
+            i.key_down(egui::Key::Space)
         });
-        if redo {
-            self.redo();
-        }
-        if undo {
-            self.undo();
-        }
-        ctx.input(|i| {
-            if i.modifiers.any() {
-                return;
+        let pressed: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect()
+        });
+        for (key, mods) in pressed {
+            let Some(c) = commands::COMMANDS.iter().find(|c| c.keys.iter().any(|k| k.matches(key, mods))) else { continue };
+            let k = c.keys.iter().find(|k| k.matches(key, mods)).expect("just matched");
+            if typing && (!k.ctrl || matches!(c.cmd, Cmd::Undo | Cmd::Redo)) {
+                continue;
             }
-            for tool in Tool::ALL {
-                if i.key_pressed(tool.key()) {
-                    self.tool = tool;
+            // While the palette or the sheet is up, only the keys with Ctrl (and ? to close the sheet) work.
+            if (self.palette.open || self.shortcuts_open) && !k.ctrl && c.cmd != Cmd::Shortcuts {
+                continue;
+            }
+            match self.unavailable(c.cmd) {
+                None => self.run(c.cmd),
+                Some(why) => self.toast = Some((format!("{}: {why}.", c.name.trim_end_matches('…')), self.now)),
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- commands
+
+    /// Why `cmd` can't run right now, in a few plain words, or `None` if it can.
+    fn unavailable(&self, cmd: Cmd) -> Option<String> {
+        let model = self.mesh.as_ref();
+        let no_model = || Some("Open a model first".to_owned());
+        let set = self.sets.get(self.active_set);
+        let layer = set.and_then(|s| s.layers.get(s.selected));
+        match cmd {
+            Cmd::Save | Cmd::SaveAs if model.is_none() => no_model(),
+            Cmd::Save | Cmd::SaveAs if self.save_job.is_some() => Some("Already saving".into()),
+            Cmd::Export if model.is_none() => no_model(),
+            Cmd::Export if !model.is_some_and(|m| m.has_uvs) => Some("Unwrap it first, so its maps line up".into()),
+            Cmd::Export if self.export_job.is_some() => Some("Already exporting".into()),
+            Cmd::Undo if !self.history.can_undo() => Some("Nothing to undo".into()),
+            Cmd::Redo if !self.history.can_redo() => Some("Nothing to redo".into()),
+            Cmd::Frame if model.is_none() => no_model(),
+            Cmd::NewPaintLayer | Cmd::NewFillLayer if set.is_none() => no_model(),
+            Cmd::AddMask | Cmd::DuplicateLayer | Cmd::DeleteLayer | Cmd::LayerUp | Cmd::LayerDown if set.is_none() => no_model(),
+            Cmd::AddMask | Cmd::DuplicateLayer | Cmd::DeleteLayer | Cmd::LayerUp | Cmd::LayerDown if layer.is_none() => {
+                Some("Select a layer first".into())
+            }
+            Cmd::AddMask if layer.is_some_and(|l| l.mask.is_some()) => Some("This layer has a mask already".into()),
+            Cmd::LayerUp if set.is_some_and(|s| s.selected + 1 >= s.layers.len()) => Some("It's the top layer already".into()),
+            Cmd::LayerDown if set.is_some_and(|s| s.selected == 0) => Some("It's the bottom layer already".into()),
+            Cmd::Unwrap(_) | Cmd::Repack if model.is_none() => no_model(),
+            Cmd::Unwrap(_) | Cmd::Repack if self.unwrap_job.is_some() => Some("Already working on it".into()),
+            Cmd::Repack if !model.is_some_and(|m| m.has_uvs) => Some("Needs UVs to repack. Unwrap makes them".into()),
+            Cmd::Repack if self.uv_health.as_ref().is_some_and(|(s, h, _)| *s == self.active_set && h.unusable()) => {
+                Some("Needs UVs to repack. Unwrap makes them".into())
+            }
+            Cmd::ResetTips if !self.tips.any_hidden() => Some("Every tip is still on".into()),
+            _ => None,
+        }
+    }
+
+    /// For commands that choose something: whether it's the current choice.
+    fn cmd_on(&self, cmd: Cmd) -> Option<bool> {
+        let b = &self.brush;
+        Some(match cmd {
+            Cmd::Tool(t) => self.tool == t,
+            Cmd::View(v) => self.view_mode == v,
+            Cmd::Workspace(w) => self.workspace == w,
+            Cmd::PaintColour => b.paint_colour,
+            Cmd::PaintRough => b.paint_rough,
+            Cmd::PaintMetal => b.paint_metal,
+            Cmd::PaintHeight => b.paint_height,
+            _ => return None,
+        })
+    }
+
+    fn run(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::Open => self.open_dialog(),
+            Cmd::Save => {
+                self.save(false);
+            }
+            Cmd::SaveAs => {
+                self.save(true);
+            }
+            Cmd::Export => self.export_to_godot(),
+            Cmd::ExportFolder => {
+                self.pick_export_dir();
+            }
+            // Goes through handle_close like the window's close button.
+            Cmd::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Cmd::Undo => self.undo(),
+            Cmd::Redo => self.redo(),
+            Cmd::Tool(t) => self.tool = t,
+            Cmd::BrushSmaller => self.brush.size = (self.brush.size / 1.15).max(1.0),
+            Cmd::BrushBigger => self.brush.size = (self.brush.size * 1.15).min(1000.0),
+            Cmd::SwapColours => std::mem::swap(&mut self.primary, &mut self.secondary),
+            Cmd::ColourPanel => {
+                self.workspace = Workspace::Paint;
+                self.colour_open = true;
+            }
+            Cmd::PenSettings => {
+                // The curve lives in the brush bar, which shows for the painting tools.
+                self.workspace = Workspace::Paint;
+                if !self.tool.strokes() {
+                    self.tool = Tool::Brush;
                 }
+                self.pen_open = true;
             }
-            if i.key_pressed(egui::Key::OpenBracket) {
-                self.brush.size = (self.brush.size / 1.15).max(1.0);
-            }
-            if i.key_pressed(egui::Key::CloseBracket) {
-                self.brush.size = (self.brush.size * 1.15).min(1000.0);
-            }
-            if i.key_pressed(egui::Key::X) {
-                std::mem::swap(&mut self.primary, &mut self.secondary);
-            }
-            if i.key_pressed(egui::Key::F) {
+            Cmd::PaintColour => self.brush.paint_colour = !self.brush.paint_colour,
+            Cmd::PaintRough => self.brush.paint_rough = !self.brush.paint_rough,
+            Cmd::PaintMetal => self.brush.paint_metal = !self.brush.paint_metal,
+            Cmd::PaintHeight => self.brush.paint_height = !self.brush.paint_height,
+            Cmd::NewPaintLayer => self.add_layer(false),
+            Cmd::NewFillLayer => self.add_layer(true),
+            Cmd::AddMask => self.layer_action(LayerAction::AddMask),
+            Cmd::DuplicateLayer => self.layer_action(LayerAction::Duplicate),
+            Cmd::DeleteLayer => self.layer_action(LayerAction::Delete),
+            Cmd::LayerUp => self.layer_action(LayerAction::Up),
+            Cmd::LayerDown => self.layer_action(LayerAction::Down),
+            Cmd::Frame => {
                 if let Some(m) = &self.mesh {
                     let (c, r) = m.bounding_sphere();
                     self.camera.frame(c, r);
                 }
             }
-        });
+            Cmd::View(v) => {
+                self.view_mode = v;
+                // The UV workspace always shows the checker, so go where the view applies.
+                if self.workspace == Workspace::Uv {
+                    self.workspace = Workspace::Paint;
+                }
+            }
+            Cmd::Workspace(w) => self.workspace = w,
+            Cmd::Unwrap(method) => {
+                self.unwrap_method = method;
+                self.workspace = Workspace::Uv;
+                self.start_unwrap(self.chosen_unwrap());
+            }
+            Cmd::Repack => {
+                self.workspace = Workspace::Uv;
+                self.start_unwrap(unwrap::Mode::Repack);
+            }
+            Cmd::Palette => {
+                self.shortcuts_open = false;
+                self.palette.toggle();
+            }
+            Cmd::Shortcuts => {
+                self.palette.open = false;
+                self.shortcuts_open = !self.shortcuts_open;
+            }
+            Cmd::ResetTips => {
+                self.tips.reset();
+                self.toast = Some(("Tips are back on. Each shows once, the first time it applies.".into(), self.now));
+            }
+        }
+    }
+
+    /// The tooltip for a button that runs `cmd`: its name and key, and why not if it can't run.
+    fn tip(&self, cmd: Cmd) -> String {
+        match self.unavailable(cmd) {
+            Some(why) => format!("{}\n{why}", commands::tip(cmd)),
+            None => commands::tip(cmd),
+        }
+    }
+
+    fn layer_action(&mut self, action: LayerAction) {
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        let Some(set) = self.sets.get_mut(self.active_set) else { return };
+        let (i, n) = (set.selected, set.layers.len());
+        if i >= n {
+            return;
+        }
+        match action {
+            LayerAction::Up if i + 1 < n => {
+                set.layers.swap(i, i + 1);
+                set.selected = i + 1;
+            }
+            LayerAction::Down if i > 0 => {
+                set.layers.swap(i, i - 1);
+                set.selected = i - 1;
+            }
+            LayerAction::Duplicate => {
+                let copy = set.layers[i].duplicate(device, queue);
+                set.layers.insert(i + 1, copy);
+                set.selected = i + 1;
+            }
+            LayerAction::Delete => {
+                set.layers.remove(i);
+                set.selected = i.saturating_sub(1).min(set.layers.len().saturating_sub(1));
+            }
+            LayerAction::AddMask => {
+                let layer = &mut set.layers[i];
+                if layer.mask.is_none() {
+                    layer.mask = Some(Rc::new(Mask::white(device, queue)));
+                }
+                self.tool = Tool::Mask;
+            }
+            _ => {}
+        }
     }
 
     fn undo(&mut self) {
@@ -1245,7 +1390,7 @@ impl UmberApp {
                 let f = job.done.load(Ordering::Relaxed) as f32 / job.steps.max(1) as f32;
                 ui.label(egui::RichText::new(format!("Saving {}", pct(f))).color(TEXT_3));
             } else if self.unsaved() {
-                ui.label(egui::RichText::new("●").size(10.0).color(ACCENT)).on_hover_text("Unsaved changes (Ctrl+S saves)");
+                ui.label(egui::RichText::new("●").size(10.0).color(ACCENT)).on_hover_text(format!("Unsaved changes ({} saves)", commands::key_label(Cmd::Save).unwrap_or_default()));
             }
         });
 
@@ -1272,29 +1417,38 @@ impl UmberApp {
                 Some(f) => format!("Exporting {}", pct(f)),
                 None => "Export to Godot".to_owned(),
             };
-            let tip = match &self.export_dir {
-                Some(dir) => format!("Export again to {} (Ctrl+E)", home_relative(dir)),
-                None => "Write a .glb, a Godot material and its maps (Ctrl+E)".to_owned(),
+            let key = commands::key_label(Cmd::Export).unwrap_or_default();
+            let tip = match (self.unavailable(Cmd::Export), &self.export_dir) {
+                (Some(why), _) if exporting.is_none() => format!("{why}.\nThen this writes a .glb, a Godot material and its maps ({key})"),
+                (_, Some(dir)) => format!("Export again to {} ({key})", home_relative(dir)),
+                (_, None) => format!("Write a .glb, a Godot material and its maps ({key})"),
             };
             if widgets::button(ui, &label, exporting.is_none(), 34.0).on_hover_text(tip).clicked() && exporting.is_none() {
                 self.export_to_godot();
             }
             ui.add_space(4.0);
-            if widgets::icon_action(ui, icons::REDO, self.history.can_redo(), 36.0, "Redo (Ctrl+Shift+Z)").clicked() {
+            if widgets::icon_action(ui, icons::REDO, self.history.can_redo(), 36.0, &self.tip(Cmd::Redo)).clicked() {
                 self.redo();
             }
-            if widgets::icon_action(ui, icons::UNDO, self.history.can_undo(), 36.0, "Undo (Ctrl+Z)").clicked() {
+            if widgets::icon_action(ui, icons::UNDO, self.history.can_undo(), 36.0, &self.tip(Cmd::Undo)).clicked() {
                 self.undo();
             }
-            let save_tip = match &self.project_path {
-                Some(p) => format!("Save to {} (Ctrl+S)", home_relative(p)),
-                None => "Save as a project, layers and all (Ctrl+S)".to_owned(),
+            let key = commands::key_label(Cmd::Save).unwrap_or_default();
+            let save_tip = match (self.unavailable(Cmd::Save), &self.project_path) {
+                (Some(why), _) => format!("Save ({key})\n{why}"),
+                (None, Some(p)) => format!("Save to {} ({key})", home_relative(p)),
+                (None, None) => format!("Save as a project, layers and all ({key})"),
             };
             if widgets::icon_action(ui, icons::SAVE, self.mesh.is_some(), 36.0, &save_tip).clicked() {
                 self.save(false);
             }
-            if widgets::icon_button(ui, icons::FOLDER_OPEN, false, 36.0, "Open a model or project (Ctrl+O)").clicked() {
+            if widgets::icon_button(ui, icons::FOLDER_OPEN, false, 36.0, &format!("Open a model or project ({})", commands::key_label(Cmd::Open).unwrap_or_default())).clicked() {
                 self.open_dialog();
+            }
+            widgets::vdivider(ui, 18.0);
+            let search = format!("Search commands ({})\nType what you want to do; every command is there", commands::key_label(Cmd::Palette).unwrap_or_default());
+            if widgets::icon_button(ui, icons::SEARCH, self.palette.open, 36.0, &search).clicked() {
+                self.run(Cmd::Palette);
             }
         });
     }
@@ -1306,12 +1460,17 @@ impl UmberApp {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
 
-        // Navigation: right or middle drag orbits, Shift pans, Alt + left drag orbits for pen-only use.
-        let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+        // Navigation: right, middle or a pen's extra button drag orbits, Shift pans. For pen-only
+        // use, holding Alt or Space turns a left drag into one too (Huion's driver can send
+        // Space from a pen button).
+        let (shift, alt, space) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt, self.space_held));
+        let hand = alt || space;
         let delta = response.drag_delta();
         let nav_drag = response.dragged_by(egui::PointerButton::Secondary)
             || response.dragged_by(egui::PointerButton::Middle)
-            || (alt && response.dragged_by(egui::PointerButton::Primary));
+            || response.dragged_by(egui::PointerButton::Extra1)
+            || response.dragged_by(egui::PointerButton::Extra2)
+            || (hand && self.stroke.is_none() && response.dragged_by(egui::PointerButton::Primary));
         if nav_drag {
             if shift {
                 self.camera.pan(delta.x, delta.y, rect.height());
@@ -1343,10 +1502,10 @@ impl UmberApp {
         }
         let cam = brush::View { view_proj: proj * view, eye: self.camera.eye(), size };
         let has_uvs = self.mesh.as_ref().is_some_and(|m| m.has_uvs);
-        if in_paint && pressed && !alt && response.hovered() && self.stroke.is_none() && !has_uvs {
+        if in_paint && pressed && !hand && response.hovered() && self.stroke.is_none() && !has_uvs {
             self.no_uv_offer_dismissed = false;
             self.toast = Some(("This model has no UVs yet, so there's nowhere for paint to go. Auto-unwrap it first.".into(), self.now));
-        } else if in_paint && pressed && !alt && response.hovered() && self.stroke.is_none() {
+        } else if in_paint && pressed && !hand && response.hovered() && self.stroke.is_none() {
             if let Some(origin) = origin {
                 match self.tool {
                     t if t.strokes() => {
@@ -1380,7 +1539,9 @@ impl UmberApp {
 
         // Brush cursor: outer ring is the full size, inner ring shows the hardness falloff.
         let painting = self.workspace == Workspace::Paint && self.mesh.is_some() && self.tool.shows_brush_cursor();
-        if painting && !nav_drag && !alt {
+        if hand && response.hovered() {
+            ui.ctx().set_cursor_icon(if nav_drag { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        } else if painting && !nav_drag {
             if let Some(pos) = response.hover_pos() {
                 self.brush_cursor(ui.painter(), pos);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
@@ -1694,8 +1855,9 @@ impl UmberApp {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.vertical_centered(|ui| {
                     for tool in Tool::ALL {
-                        let tip = format!("{}  ({})", tool.name(), tool.key().name());
-                        if widgets::icon_button(ui, tool.icon(), self.tool == tool, 44.0, &tip).clicked() {
+                        let tip = format!("{}\n{}", commands::tip(Cmd::Tool(tool)), commands::get(Cmd::Tool(tool)).about);
+                        // On press, not release: a pen tap that slides a little still lands.
+                        if widgets::tapped(&widgets::icon_button(ui, tool.icon(), self.tool == tool, 44.0, &tip)) {
                             self.tool = tool;
                         }
                     }
@@ -1710,7 +1872,7 @@ impl UmberApp {
                     let front = puck.min + Vec2::splat(17.0);
                     p.circle(front, 13.0, self.primary, Stroke::new(2.0, PANEL));
                     p.circle_stroke(front, 14.5, Stroke::new(1.0, Color32::from_rgb(0x54, 0x4a, 0x3f)));
-                    if resp.on_hover_text("Colour (X swaps)").clicked() {
+                    if resp.on_hover_text(format!("Colour ({} swaps)", commands::key_label(Cmd::SwapColours).unwrap_or_default())).clicked() {
                         self.colour_open = !self.colour_open;
                     }
                 });
@@ -1990,28 +2152,31 @@ impl UmberApp {
 
     /// Settings for the selected layer: order, blend mode, opacity, and a fill layer's values.
     fn layer_properties(&mut self, ui: &mut egui::Ui) {
-        let (device, queue) = (&self.rs.device, &self.rs.queue);
-        let Some(set) = self.sets.get_mut(self.active_set) else { return };
-        let (i, n) = (set.selected, set.layers.len());
         let mut action = None;
         ui.horizontal(|ui| {
             widgets::caps_label(ui, "Selected layer");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if widgets::icon_action(ui, icons::TRASH, true, 30.0, "Delete layer").clicked() {
-                    action = Some(LayerAction::Delete);
-                }
-                if widgets::icon_action(ui, icons::COPY, true, 30.0, "Duplicate layer").clicked() {
-                    action = Some(LayerAction::Duplicate);
-                }
-                if widgets::icon_action(ui, icons::ARROW_DOWN, i > 0, 30.0, "Move down").clicked() {
-                    action = Some(LayerAction::Down);
-                }
-                if widgets::icon_action(ui, icons::ARROW_UP, i + 1 < n, 30.0, "Move up").clicked() {
-                    action = Some(LayerAction::Up);
+                for (icon, cmd) in [
+                    (icons::TRASH, Cmd::DeleteLayer),
+                    (icons::COPY, Cmd::DuplicateLayer),
+                    (icons::ARROW_DOWN, Cmd::LayerDown),
+                    (icons::ARROW_UP, Cmd::LayerUp),
+                ] {
+                    let ok = self.unavailable(cmd).is_none();
+                    if widgets::icon_action(ui, icon, ok, 30.0, &self.tip(cmd)).clicked() {
+                        action = Some(cmd);
+                    }
                 }
             });
         });
+        if let Some(cmd) = action {
+            self.run(cmd);
+            return;
+        }
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        let Some(set) = self.sets.get_mut(self.active_set) else { return };
+        let i = set.selected;
         ui.add_space(2.0);
         let w = ui.available_width();
         let Some(layer) = set.layers.get_mut(i) else { return };
@@ -2037,11 +2202,11 @@ impl UmberApp {
                         layer.mask = None;
                     }
                     widgets::chip(ui, "Invert", &mut layer.mask_invert).on_hover_text("Swap what the mask hides and shows");
-                    if widgets::chip(ui, "Paint", &mut (self.tool == Tool::Mask)).on_hover_text("Paint the mask (M)").clicked() {
+                    if widgets::chip(ui, "Paint", &mut (self.tool == Tool::Mask)).on_hover_text(format!("Paint the mask ({})", commands::key_label(Cmd::Tool(Tool::Mask)).unwrap_or_default())).clicked() {
                         mask_tool = true;
                     }
                 } else if widgets::button(ui, "Add mask", false, 28.0)
-                    .on_hover_text("Hide parts of this layer by painting with the Mask tool (M)")
+                    .on_hover_text(format!("Hide parts of this layer by painting with the Mask tool ({})", commands::key_label(Cmd::Tool(Tool::Mask)).unwrap_or_default()))
                     .clicked()
                 {
                     layer.mask = Some(Rc::new(Mask::white(device, queue)));
@@ -2086,26 +2251,6 @@ impl UmberApp {
             }
         }
 
-        match action {
-            Some(LayerAction::Up) if i + 1 < n => {
-                set.layers.swap(i, i + 1);
-                set.selected = i + 1;
-            }
-            Some(LayerAction::Down) if i > 0 => {
-                set.layers.swap(i, i - 1);
-                set.selected = i - 1;
-            }
-            Some(LayerAction::Duplicate) => {
-                let copy = set.layers[i].duplicate(device, queue);
-                set.layers.insert(i + 1, copy);
-                set.selected = i + 1;
-            }
-            Some(LayerAction::Delete) => {
-                set.layers.remove(i);
-                set.selected = i.saturating_sub(1).min(set.layers.len().saturating_sub(1));
-            }
-            _ => {}
-        }
     }
 
     // ---------------------------------------------------------------- UV workspace
@@ -2374,7 +2519,7 @@ impl UmberApp {
                         self.open_dialog();
                     }
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Ctrl+O").font(theme::mono(11.0)).color(TEXT_3));
+                    ui.label(egui::RichText::new(commands::key_label(Cmd::Open).unwrap_or_default()).font(theme::mono(11.0)).color(TEXT_3));
                     ui.add_space(14.0);
                     ui.label(egui::RichText::new("or try a shape").color(TEXT_3).size(12.0));
                     ui.add_space(4.0);
@@ -2456,6 +2601,34 @@ impl UmberApp {
             });
     }
 
+    /// The one tip that applies now and hasn't been seen, below the brush bar.
+    fn tips(&mut self, ctx: &egui::Context, vp: Rect) {
+        let Some(mesh) = &self.mesh else { return };
+        // The unwrap offer and modal surfaces come first.
+        if self.unwrap_job.is_some() || (!mesh.has_uvs && !self.no_uv_offer_dismissed) || self.palette.open || self.shortcuts_open || self.pending.is_some() {
+            return;
+        }
+        let on_fill = self.sets.get(self.active_set).and_then(|s| s.selected_layer()).is_some_and(|l| l.pixels.is_none());
+        let tip = match self.workspace {
+            Workspace::Paint if self.tips.wants(Tip::Start) => Tip::Start,
+            Workspace::Paint if self.tool == Tool::Eraser && on_fill => Tip::EraseFill,
+            Workspace::Paint if self.tool == Tool::Mask => Tip::Mask,
+            Workspace::Uv => Tip::Uv,
+            Workspace::Export => Tip::Export,
+            _ => return,
+        };
+        if !self.tips.wants(tip) {
+            return;
+        }
+        let x = match self.workspace {
+            // Centred in the space the panels leave: the UV and export panels are narrower.
+            Workspace::Uv | Workspace::Export => (vp.left() + 92.0 + vp.right() - 336.0) * 0.5,
+            _ => (vp.left() + 92.0 + vp.right() - 352.0) * 0.5,
+        };
+        let top = if self.workspace == Workspace::Paint { vp.top() + 120.0 } else { vp.top() + 16.0 };
+        help::tip_card(ctx, egui::pos2(x, top), tip, &mut self.tips);
+    }
+
     fn toast(&mut self, ctx: &egui::Context, vp: Rect, now: f64) {
         let Some((msg, at)) = &self.toast else { return };
         if now - at > 6.0 {
@@ -2482,7 +2655,13 @@ impl eframe::App for UmberApp {
         GROUND.to_normalized_gamma_f32()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+        if self.parent.is_none() {
+            if let (Ok(w), Ok(d)) = (frame.window_handle(), frame.display_handle()) {
+                self.parent = Some(Parent { window: w.as_raw(), display: d.as_raw() });
+            }
+        }
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         self.now = now;
@@ -2523,7 +2702,21 @@ impl eframe::App for UmberApp {
             self.workspace_placard(&ctx, vp);
             self.unwrap_card(&ctx, vp);
         }
+        self.tips(&ctx, vp);
         self.toast(&ctx, vp, now);
+        let chosen = {
+            let (mut palette, mut sheet) = (std::mem::take(&mut self.palette), self.shortcuts_open);
+            let state = |cmd| help::CmdState { reason: self.unavailable(cmd), on: self.cmd_on(cmd) };
+            let from_palette = palette.show(&ctx, &state);
+            let from_sheet = help::shortcut_sheet(&ctx, &mut sheet);
+            (self.palette, self.shortcuts_open) = (palette, sheet);
+            from_palette.or(from_sheet)
+        };
+        if let Some(cmd) = chosen {
+            if self.unavailable(cmd).is_none() {
+                self.run(cmd);
+            }
+        }
         self.save_changes_modal(&ctx);
 
         // Anything the panels changed becomes one undo step once the pointer lets go.
@@ -2536,6 +2729,38 @@ impl eframe::App for UmberApp {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// Umber's window, handed to file pickers so the desktop keeps them above it.
+#[derive(Clone, Copy)]
+struct Parent {
+    window: raw_window_handle::RawWindowHandle,
+    display: raw_window_handle::RawDisplayHandle,
+}
+
+impl raw_window_handle::HasWindowHandle for Parent {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // Safety: the window lives as long as the app, which owns this.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.window) })
+    }
+}
+
+impl raw_window_handle::HasDisplayHandle for Parent {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        // Safety: as above.
+        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.display) })
+    }
+}
+
+impl UmberApp {
+    /// A file dialog that opens over Umber's window.
+    fn dialog(&self) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new();
+        match &self.parent {
+            Some(p) => dialog.set_parent(p),
+            None => dialog,
+        }
+    }
+}
 
 /// Take a save job off its slot once it has finished.
 fn finished(slot: &mut Option<SaveJob>, ctx: &egui::Context) -> Option<(SaveJob, anyhow::Result<()>)> {

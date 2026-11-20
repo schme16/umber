@@ -61,3 +61,15 @@ the projections, repack and the UV health numbers in `src/unwrap.rs`; paint tran
 FBX import in `src/mesh.rs`; a project save and reopen that must come back bit for bit in `src/project.rs`; export naming, `res://` paths, map readback and a GLB round trip in
 `src/export.rs`. `UMBER_TEST_MODELS=dir cargo test opens_every -- --nocapture` opens every model
 in a folder and prints what came in.
+
+## Finding things
+
+```
+scripts/capture.sh scripts/captures/help.sh          # first tip, palette, search, a greyed reason, the sheet
+scripts/capture.sh scripts/captures/space-orbit.sh   # Space+drag orbits and paints nothing
+```
+
+Each capture gets a fresh `UMBER_CONFIG_DIR`, so tips show as they would the first time. The
+phrase table in `src/commands.rs` (`cargo test commands`) is the findability check: every row is
+something a person typed, and its command must come up in the top three. Add a row whenever
+somebody can't find something.

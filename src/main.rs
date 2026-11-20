@@ -3,7 +3,9 @@
 mod app;
 mod brush;
 mod camera;
+mod commands;
 mod export;
+mod help;
 mod history;
 mod icons;
 mod mesh;

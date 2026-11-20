@@ -37,6 +37,10 @@
 - `src/mesh.rs`: mesh data, glTF/OBJ/FBX import, built-in shapes
 - `src/export.rs`: Godot export (GLB writer, ORMMaterial3D `.tres`, map readback and PNGs)
 - `src/camera.rs`: orbit camera
+- `src/commands.rs`: every command, declared once (name, keys, search words); keys, tooltips, the
+  palette and the shortcut sheet all read it. Its tests hold the phrase table and the shortcut drift check
+- `src/help.rs`: the command palette, the shortcut sheet, and first-time tips (seen ones are kept in
+  `$XDG_CONFIG_HOME/umber/prefs.json`)
 - `src/theme.rs`, `src/widgets.rs`, `src/icons.rs`: the Graphite design system
 - `src/pen.rs`: XInput2 pen pressure/tilt thread (raw events on the root window) and the pressure curve
 - `src/texset.rs` + `src/shaders/composite.wgsl`: texture sets, the layer model, the compute
@@ -101,6 +105,18 @@ with the pen, see it lit, export to Godot.
    the size and every file it writes. FBX import via ufbx: binary and ASCII, converted to Y-up
    metres, Blender's Phong-encoded PBR values read back, textures found embedded, at their
    path or beside the model.
+
+## Milestone 2
+
+- **Finding things.** Done 2026-11-20. Every command is declared once in `src/commands.rs`, and
+  keys, tooltips, the palette and the shortcut sheet all come from it, so a tooltip's key is always
+  the one that works. **Search commands** (Ctrl+K, or the magnifier in the top bar) finds anything by
+  the words people use ("rubber", "paint bucket", "exprot"), shows commands that can't run greyed
+  with the reason, and runs the rest. **Keyboard shortcuts** (? or F1) is one sheet of every key
+  and the mouse and pen moves. Tips show once, the first time each applies (opening a model, the
+  eraser on a fill layer, the mask, the UV and Export workspaces), with **No more tips**, and
+  **Show tips again** in the palette. Holding Space (or Alt) turns a left drag into an orbit, for
+  pens whose button sends Space; tools switch on the pen's press rather than its release.
 
 ## Later milestones
 
