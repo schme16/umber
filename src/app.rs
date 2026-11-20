@@ -1872,8 +1872,12 @@ impl UmberApp {
                     let front = puck.min + Vec2::splat(17.0);
                     p.circle(front, 13.0, self.primary, Stroke::new(2.0, PANEL));
                     p.circle_stroke(front, 14.5, Stroke::new(1.0, Color32::from_rgb(0x54, 0x4a, 0x3f)));
-                    if resp.on_hover_text(format!("Colour ({} swaps)", commands::key_label(Cmd::SwapColours).unwrap_or_default())).clicked() {
+                    if resp.on_hover_text("Colour").clicked() {
                         self.colour_open = !self.colour_open;
+                    }
+                    let tip = format!("{}\n{}", commands::tip(Cmd::SwapColours), commands::get(Cmd::SwapColours).about);
+                    if widgets::tapped(&widgets::icon_button(ui, icons::SWAP, false, 28.0, &tip)) {
+                        self.run(Cmd::SwapColours);
                     }
                 });
             });

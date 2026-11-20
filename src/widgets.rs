@@ -208,8 +208,10 @@ pub fn pressure_curve(ui: &mut Ui, size: egui::Vec2, curve: &crate::pen::Pressur
     response
 }
 
-/// Pressed or clicked: for choosing a tool or option, which is safe to do on the press. A pen
-/// tap often slides more than egui allows for a click, and this still lands.
+/// True once per tap, on the press rather than the release: a pen tap often slides more than
+/// egui allows for a click, and this still lands. The release that ends the tap doesn't count
+/// again, so toggles (like swapping colours) don't undo themselves; keyboard activation does.
 pub fn tapped(response: &Response) -> bool {
-    response.clicked() || (response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed()))
+    let pressed = response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed());
+    pressed || (response.clicked() && !response.ctx.input(|i| i.pointer.any_released()))
 }
