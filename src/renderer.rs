@@ -224,6 +224,13 @@ impl ViewportRenderer {
         self.mesh = Some(GpuMesh { vertex, index, submeshes, materials });
     }
 
+    /// The mesh's vertex and index buffers, and the index ranges each texture set draws.
+    pub fn mesh_draw(&self, set: usize) -> Option<crate::brush::MeshDraw<'_>> {
+        let mesh = self.mesh.as_ref()?;
+        let ranges = mesh.submeshes.iter().filter(|(_, m)| *m == set).map(|(r, _)| r.clone()).collect();
+        Some(crate::brush::MeshDraw { vertices: &mesh.vertex, indices: &mesh.index, ranges })
+    }
+
     /// Render one frame at `size` physical pixels and return the egui texture showing it.
     pub fn render(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2], p: &FrameParams) -> egui::TextureId {
         let size = [size[0].clamp(1, 8192), size[1].clamp(1, 8192)];

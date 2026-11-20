@@ -59,10 +59,19 @@ with the pen, see it lit, export to Godot.
    Compute shaders flatten the stack into colour, material (rough/metal/height/AO) and a
    height-derived normal map, only when something changed. Undo/redo covers every layer edit
    (a slider drag is one step); tiled pixel snapshots are built and tested, ready for strokes.
-   Masks are in the data model and compositor; their button arrives with the brush, which is
-   what paints them.
-4. **Brush engine.** Project brush dabs from screen to UV space via a GPU position/ID
-   buffer; spacing, pressure, flow, hardness, seam-aware bleeding; eraser, fill, picker.
+   Masks are in the data model and compositor; the brush paints them.
+4. **Brush engine.** Done 2026-11-20: projection painting. The mesh is drawn in UV space and
+   every texel checks itself against the dabs on screen and against a camera distance buffer,
+   so strokes keep their on-screen width across UV seams and stretched UVs, never reach
+   hidden surfaces, and fade on faces turned edge-on. A stroke builds up in its own buffer
+   capped at its opacity, so overlapping dabs don't darken; flow sets how fast it builds.
+   Size, opacity, flow, hardness, pen pressure and tilt; paints any of colour, roughness,
+   metalness and height. Eraser (on a fill layer it paints the mask instead), mask tool and
+   **Add mask**, fill (a UV island, or Shift for the whole material), colour and material
+   picker. Each stroke is one undo step; the shader marks the 256 px tiles it touches, so only
+   those are saved, and the history drops its oldest steps past 1.5 GB. Maps are padded past
+   UV island edges (a jump flood finds each texel's nearest island texel), so filtering
+   doesn't show seam lines. A stroke paints the material it starts on.
 5. **Auto-unwrap.** xatlas for models without UVs, plus the UV health readout
    (stretch, overlaps, space used, texel density).
 6. **Export.** GLB with embedded PBR maps, plus a Godot `.tres` StandardMaterial3D

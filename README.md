@@ -4,7 +4,7 @@ Fast, GPU-accelerated UV unwrapping and texture/material painting for game artis
 Open a model, with or without UVs, and start painting with a pen, mouse or keyboard,
 then export a game-ready model to Godot.
 
-Status: early. The shell, model import, lit viewport and GPU layer stack work; the brush is next.
+Status: early. Model import, the lit viewport, the GPU layer stack and the brush work; auto-unwrap and Godot export are next.
 See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Run
@@ -26,8 +26,12 @@ Linux only for now. You need a Vulkan driver.
 | Frame the model | | F |
 | Open a model | Drop a file on the window | Ctrl+O |
 | Tools | Tool rail on the left | B E S G C D M I |
+| Paint | Left drag with Brush, Eraser or Mask | |
+| Fill a UV island | Click with Fill (Shift + click: the whole material) | |
+| Pick colour and material | Click with the Colour picker | |
 | Brush size | | [ and ] |
 | Swap colours | | X |
+| Undo, redo | | Ctrl+Z, Ctrl+Shift+Z |
 
 ## Formats
 

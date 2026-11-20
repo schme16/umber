@@ -1,6 +1,7 @@
 //! Umber: GPU-accelerated UV unwrapping and texture/material painting.
 
 mod app;
+mod brush;
 mod camera;
 mod history;
 mod icons;

@@ -29,7 +29,11 @@ const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MAT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const COV_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// A paint layer's colour, material and coverage textures, in that order.
+pub const PAINT_FORMATS: [wgpu::TextureFormat; 3] = [COLOR_FORMAT, MAT_FORMAT, COV_FORMAT];
+pub const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// "No island texel near here" in the padding map.
+const NO_SEED: u32 = u32::MAX;
 /// A full 0 to 1 height step across one texel, scaled so a ramp over ~1 % of a 2048 map
 /// reads as about 45 degrees.
 const NORMAL_STRENGTH: f32 = 20.0 * SIZE as f32 / 2048.0;
@@ -142,17 +146,20 @@ impl PaintPixels {
     fn textures(&self) -> [(&wgpu::Texture, u32); 3] {
         [(&self.color, 4), (&self.mat, 8), (&self.cov, 4)]
     }
+
+    /// The same, as owned handles (for undo snapshots and strokes).
+    pub fn targets(&self) -> Vec<(wgpu::Texture, u32)> {
+        self.textures().into_iter().map(|(t, bpp)| (t.clone(), bpp)).collect()
+    }
 }
 
 /// Greyscale layer mask in the red channel; white shows the layer.
 pub struct Mask {
-    #[allow(dead_code)] // The brush paints into it (M1.4).
     pub texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
 
 impl Mask {
-    #[allow(dead_code)] // Masks get a button once the brush can paint them (M1.4).
     pub fn white(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let texture = layer_texture(device, "layer mask", MASK_FORMAT, SIZE);
         write_full(queue, &texture, &vec![255u8; (SIZE * SIZE * 4) as usize], 4);
@@ -273,6 +280,9 @@ pub struct TextureSet {
     pub committed: Vec<Layer>,
     composited: Option<Vec<Layer>>,
     outputs: Outputs,
+    /// For every texel, the nearest texel the mesh's UVs cover (packed x | y << 16), so the
+    /// maps can be padded past island edges. `None` until [`Compositor::set_islands`] runs.
+    padding: Option<wgpu::TextureView>,
 }
 
 struct Outputs {
@@ -347,6 +357,9 @@ pub struct Compositor {
     white: wgpu::TextureView,
     empty_color: wgpu::TextureView,
     empty_mat: wgpu::TextureView,
+    no_padding: wgpu::TextureView,
+    islands: wgpu::RenderPipeline,
+    jump: wgpu::ComputePipeline,
 }
 
 impl Compositor {
@@ -388,6 +401,46 @@ impl Compositor {
         let white = tiny("white mask", MASK_FORMAT, &[255; 4]);
         let empty_color = tiny("empty colour", COLOR_FORMAT, &[0; 4]);
         let empty_mat = tiny("empty mat", MAT_FORMAT, &[0; 8]);
+        let no_padding = tiny("no padding", wgpu::TextureFormat::R32Uint, &NO_SEED.to_le_bytes());
+
+        let padding = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("padding"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/padding.wgsl").into()),
+        });
+        let islands = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("uv islands"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &padding,
+                entry_point: Some("vs_islands"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: std::mem::offset_of!(mesh::Vertex, uv) as u64,
+                        shader_location: 0,
+                    }],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &padding,
+                entry_point: Some("fs_islands"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let jump = pipeline(&padding, "jump");
 
         let resolve_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("resolve params"),
@@ -409,6 +462,9 @@ impl Compositor {
             white,
             empty_color,
             empty_mat,
+            no_padding,
+            islands,
+            jump,
         }
     }
 
@@ -450,6 +506,7 @@ impl Compositor {
             dirty: true,
             composited: None,
             outputs: self.outputs(device),
+            padding: None,
         }
     }
 
@@ -508,6 +565,96 @@ impl Compositor {
             mat,
             normal,
         }
+    }
+
+    /// Work out where the set's UV islands are, so the maps get padded past their edges and
+    /// filtering never pulls in colour from outside an island (the seam lines you'd otherwise
+    /// see). Draws the set's triangles in UV space, then a jump flood finds, for every texel,
+    /// the nearest texel inside an island.
+    pub fn set_islands(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        set: &mut TextureSet,
+        vertices: &wgpu::Buffer,
+        indices: &wgpu::Buffer,
+        ranges: &[std::ops::Range<u32>],
+    ) {
+        let make = |label| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Uint,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+        };
+        let ping = [make("padding a"), make("padding b")];
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("uv islands") });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("uv islands"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &ping[0],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: NO_SEED as f64, g: 0.0, b: 0.0, a: 0.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.islands);
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            for r in ranges {
+                pass.draw_indexed(r.clone(), 0, 0..1);
+            }
+        }
+        // Steps SIZE/2, SIZE/4 .. 1, then 1 again to mop up the flood's rare misses.
+        let mut steps = Vec::new();
+        let mut k = SIZE / 2;
+        while k >= 1 {
+            steps.push(k);
+            k /= 2;
+        }
+        steps.push(1);
+        let layout = self.jump.get_bind_group_layout(0);
+        let mut cur = 0;
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("jump flood"), timestamp_writes: None });
+            pass.set_pipeline(&self.jump);
+            for step in steps {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("jump step"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[step, 0, 0, 0]));
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("jump flood"),
+                    layout: &layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: view(&ping[cur]) },
+                        wgpu::BindGroupEntry { binding: 2, resource: view(&ping[1 - cur]) },
+                    ],
+                });
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(SIZE.div_ceil(8), SIZE.div_ceil(8), 1);
+                cur = 1 - cur;
+            }
+        }
+        queue.submit([enc.finish()]);
+        let [a, b] = ping;
+        set.padding = Some(if cur == 0 { a } else { b });
+        set.dirty = true;
     }
 
     /// Flatten the set's stack into its maps if anything changed since last time.
@@ -590,6 +737,7 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 10, resource: view(&out.color_level0) },
                 wgpu::BindGroupEntry { binding: 11, resource: view(&out.mat_level0) },
                 wgpu::BindGroupEntry { binding: 12, resource: view(&out.normal_level0) },
+                wgpu::BindGroupEntry { binding: 13, resource: view(set.padding.as_ref().unwrap_or(&self.no_padding)) },
             ],
         });
 
@@ -659,27 +807,48 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
 /// Copies of some tiles of a paint layer, taken before a change so it can be undone.
 pub struct TileSnapshot {
-    target: Rc<PaintPixels>,
+    /// The textures the tiles belong to, with bytes per texel.
+    targets: Vec<(wgpu::Texture, u32)>,
     tiles: Vec<[u32; 2]>,
-    /// One buffer per layer texture, tiles packed one after another.
+    /// One buffer per target texture, tiles packed one after another.
     buffers: Vec<wgpu::Buffer>,
 }
 
 impl TileSnapshot {
-    /// Save `tiles` (tile coordinates, not texels) of `target`.
-    #[allow(dead_code)] // Strokes call this from M1.4.
-    pub fn capture(device: &wgpu::Device, queue: &wgpu::Queue, target: &Rc<PaintPixels>, tiles: Vec<[u32; 2]>) -> Self {
+    /// Save `tiles` (tile coordinates, not texels) of `targets`.
+    #[cfg(test)]
+    pub fn capture(device: &wgpu::Device, queue: &wgpu::Queue, targets: Vec<(wgpu::Texture, u32)>, tiles: Vec<[u32; 2]>) -> Self {
+        let sources: Vec<wgpu::Texture> = targets.iter().map(|(t, _)| t.clone()).collect();
+        Self::capture_from(device, queue, &sources.iter().collect::<Vec<_>>(), targets, tiles)
+    }
+
+    /// Save `tiles` of `sources` as the earlier state of `targets` (same formats, one each).
+    /// Strokes use this to save the copy they took before painting.
+    pub fn capture_from(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sources: &[&wgpu::Texture],
+        targets: Vec<(wgpu::Texture, u32)>,
+        tiles: Vec<[u32; 2]>,
+    ) -> Self {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tile capture") });
-        let snap = Self::encode_capture(device, &mut enc, target, tiles);
+        let snap = Self::encode_capture(device, &mut enc, sources, targets, tiles);
         queue.submit([enc.finish()]);
         snap
     }
 
-    fn encode_capture(device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, target: &Rc<PaintPixels>, tiles: Vec<[u32; 2]>) -> Self {
-        let buffers = target
-            .textures()
-            .into_iter()
-            .map(|(tex, bpp)| {
+    fn encode_capture(
+        device: &wgpu::Device,
+        enc: &mut wgpu::CommandEncoder,
+        sources: &[&wgpu::Texture],
+        targets: Vec<(wgpu::Texture, u32)>,
+        tiles: Vec<[u32; 2]>,
+    ) -> Self {
+        let buffers = sources
+            .iter()
+            .zip(&targets)
+            .map(|(tex, (_, bpp))| {
+                let (tex, bpp) = (*tex, *bpp);
                 let tile_bytes = (TILE * TILE * bpp) as u64;
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("undo tiles"),
@@ -693,31 +862,31 @@ impl TileSnapshot {
                 buffer
             })
             .collect();
-        Self { target: target.clone(), tiles, buffers }
+        Self { targets, tiles, buffers }
     }
 
     /// Put the saved tiles back, and return a snapshot of what they replaced (for redo).
     pub fn restore(self, device: &wgpu::Device, queue: &wgpu::Queue) -> TileSnapshot {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tile restore") });
-        let current = Self::encode_capture(device, &mut enc, &self.target, self.tiles.clone());
-        for ((tex, bpp), buffer) in self.target.textures().into_iter().zip(&self.buffers) {
+        let sources: Vec<wgpu::Texture> = self.targets.iter().map(|(t, _)| t.clone()).collect();
+        let current = Self::encode_capture(device, &mut enc, &sources.iter().collect::<Vec<_>>(), self.targets.clone(), self.tiles.clone());
+        for ((tex, bpp), buffer) in self.targets.iter().zip(&self.buffers) {
             let tile_bytes = (TILE * TILE * bpp) as u64;
             for (k, t) in self.tiles.iter().enumerate() {
-                enc.copy_buffer_to_texture(tile_buffer(buffer, k as u64 * tile_bytes, bpp), tile_copy(tex, *t), tile_extent());
+                enc.copy_buffer_to_texture(tile_buffer(buffer, k as u64 * tile_bytes, *bpp), tile_copy(tex, *t), tile_extent());
             }
         }
         queue.submit([enc.finish()]);
         current
     }
 
-    #[allow(dead_code)] // The history will cap itself by bytes once strokes make snapshots.
     pub fn bytes(&self) -> u64 {
         self.buffers.iter().map(|b| b.size()).sum()
     }
 }
 
 /// Every tile touched by the texel rectangle `min..max` (exclusive), clamped to the set.
-#[allow(dead_code)] // The brush engine (M1.4) calls this per dab.
+#[cfg(test)]
 pub fn tiles_in_rect(min: [u32; 2], max: [u32; 2]) -> Vec<[u32; 2]> {
     let n = SIZE / TILE;
     let (x0, y0) = ((min[0] / TILE).min(n), (min[1] / TILE).min(n));
@@ -808,6 +977,31 @@ fn prepare_import(image: &mesh::Image, factor: [f32; 4]) -> (Vec<u8>, Color32) {
     (rgba, Color32::from_rgb((sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8))
 }
 
+/// Read one texel of mip 0 back as bytes.
+pub fn read_texel(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture, x: u32, y: u32, bpp: u32) -> Vec<u8> {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 256,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(1) } },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    queue.submit([enc.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    buffer.slice(..).get_mapped_range().expect("mapped")[..bpp as usize].to_vec()
+}
+
+/// A half float's bits as f32.
+pub fn f16_to_f32(lo: u8, hi: u8) -> f32 {
+    half::f16::from_le_bytes([lo, hi]).to_f32()
+}
+
 pub fn srgb8_to_linear(v: u8) -> f32 {
     let v = v as f32 / 255.0;
     if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
@@ -820,33 +1014,14 @@ pub fn linear_to_srgb8(v: f32) -> u8 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    pub(crate) use super::read_texel;
 
-    fn gpu() -> (wgpu::Device, wgpu::Queue) {
+    pub(crate) fn gpu() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a GPU adapter");
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a GPU device")
-    }
-
-    /// Read one texel of mip 0 back as bytes.
-    fn read_texel(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture, x: u32, y: u32, bpp: u32) -> Vec<u8> {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: 256,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(1) } },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        );
-        queue.submit([enc.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
-        device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        buffer.slice(..).get_mapped_range().expect("mapped")[..bpp as usize].to_vec()
     }
 
     fn fill(colour: Color32) -> Fill {
@@ -921,7 +1096,7 @@ mod tests {
         };
         let at = |x, y| read_texel(&device, &queue, &pixels.color, x, y, 4)[0];
         write_tile(40);
-        let before = TileSnapshot::capture(&device, &queue, &pixels, tiles);
+        let before = TileSnapshot::capture(&device, &queue, pixels.targets(), tiles);
         write_tile(200);
         assert_eq!(at(TILE + 5, 2 * TILE + 5), 200);
         let redo = before.restore(&device, &queue);

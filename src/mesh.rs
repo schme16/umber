@@ -85,6 +85,97 @@ impl Mesh {
         let (lo, hi) = self.bounds();
         ((lo + hi) * 0.5, ((hi - lo).length() * 0.5).max(1e-4))
     }
+
+    /// The nearest triangle the ray hits, both sides counted.
+    pub fn raycast(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
+        let mut best: Option<Hit> = None;
+        for (tri, idx) in self.indices.chunks_exact(3).enumerate() {
+            let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(self.vertices[idx[k] as usize].pos));
+            // Moller-Trumbore.
+            let (e1, e2) = (b - a, c - a);
+            let p = dir.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let inv = 1.0 / det;
+            let s = origin - a;
+            let u = s.dot(p) * inv;
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
+            let q = s.cross(e1);
+            let v = dir.dot(q) * inv;
+            if v < 0.0 || u + v > 1.0 {
+                continue;
+            }
+            let t = e2.dot(q) * inv;
+            if t > 0.0 && best.as_ref().is_none_or(|h| t < h.t) {
+                best = Some(Hit { triangle: tri, t, bary: [1.0 - u - v, u, v] });
+            }
+        }
+        best
+    }
+
+    /// Texture coordinates at a hit.
+    pub fn uv_at(&self, hit: &Hit) -> Vec2 {
+        let idx = &self.indices[hit.triangle * 3..hit.triangle * 3 + 3];
+        (0..3).map(|k| Vec2::from(self.vertices[idx[k] as usize].uv) * hit.bary[k]).sum()
+    }
+
+    /// Which material (texture set) draws a triangle.
+    pub fn material_of(&self, triangle: usize) -> usize {
+        let index = triangle as u32 * 3;
+        self.submeshes
+            .iter()
+            .find(|s| (s.index_start..s.index_start + s.index_count).contains(&index))
+            .map(|s| s.material)
+            .unwrap_or(0)
+    }
+
+    /// An island number for every triangle: triangles joined by corners with the same position
+    /// and UV belong to one UV island.
+    pub fn uv_islands(&self) -> Vec<u32> {
+        use std::collections::HashMap;
+        let mut welded: HashMap<[u32; 5], u32> = HashMap::new();
+        let corner: Vec<u32> = self
+            .vertices
+            .iter()
+            .map(|v| {
+                let key = [v.pos[0].to_bits(), v.pos[1].to_bits(), v.pos[2].to_bits(), v.uv[0].to_bits(), v.uv[1].to_bits()];
+                let next = welded.len() as u32;
+                *welded.entry(key).or_insert(next)
+            })
+            .collect();
+        let mut parent: Vec<u32> = (0..welded.len() as u32).collect();
+        fn find(parent: &mut [u32], mut x: u32) -> u32 {
+            while parent[x as usize] != x {
+                parent[x as usize] = parent[parent[x as usize] as usize];
+                x = parent[x as usize];
+            }
+            x
+        }
+        for idx in self.indices.chunks_exact(3) {
+            let a = find(&mut parent, corner[idx[0] as usize]);
+            for &k in &idx[1..] {
+                let b = find(&mut parent, corner[k as usize]);
+                let a = find(&mut parent, a);
+                if a != b {
+                    parent[b as usize] = a;
+                }
+            }
+        }
+        self.indices.chunks_exact(3).map(|idx| find(&mut parent, corner[idx[0] as usize])).collect()
+    }
+}
+
+/// Where a ray met the mesh.
+#[derive(Clone, Copy, Debug)]
+pub struct Hit {
+    pub triangle: usize,
+    pub t: f32,
+    /// Weights of the triangle's three corners.
+    pub bary: [f32; 3],
 }
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &["glb", "gltf", "obj"];
@@ -356,7 +447,8 @@ pub fn sphere(segments: u32, rings: u32) -> Mesh {
 }
 
 pub fn cube() -> Mesh {
-    // Each face gets its own cell in a 3x2 atlas so the UV checker reads cleanly.
+    // Each face gets its own cell in a 3x2 atlas so the UV checker reads cleanly, inset by a
+    // small gutter so filtering at one face's edge never reads the next face's texels.
     let faces: [(Vec3, Vec3, Vec3); 6] = [
         (Vec3::X, Vec3::NEG_Z, Vec3::Y),
         (Vec3::NEG_X, Vec3::Z, Vec3::Y),
@@ -372,7 +464,9 @@ pub fn cube() -> Mesh {
         let base = vertices.len() as u32;
         for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             let p = n + u * su + v * sv;
-            let uv = cell + Vec2::new((su + 1.0) * 0.5 / 3.0, (1.0 - (sv + 1.0) * 0.5) / 2.0);
+            const GUTTER: f32 = 0.01;
+            let (fu, fv) = ((su + 1.0) * 0.5, 1.0 - (sv + 1.0) * 0.5);
+            let uv = cell + Vec2::new(GUTTER + fu * (1.0 / 3.0 - 2.0 * GUTTER), GUTTER + fv * (0.5 - 2.0 * GUTTER));
             vertices.push(Vertex { pos: (p * 0.8).to_array(), normal: n.to_array(), uv: uv.to_array(), tangent: [0.0; 4] });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

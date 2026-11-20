@@ -13,12 +13,13 @@ use eframe::egui_wgpu::wgpu;
 
 use crate::texset::{same_stack, Layer, TextureSet, TileSnapshot};
 
-/// Oldest steps drop off past this.
+/// Oldest steps drop off past this many...
 const LIMIT: usize = 200;
+/// ...or once the saved pixels pass this many bytes of GPU memory.
+const PIXEL_BUDGET: u64 = 1536 << 20;
 
 pub enum Change {
     Stack { set: usize, layers: Vec<Layer>, selected: usize },
-    #[allow(dead_code)] // Strokes record these from M1.4.
     Pixels { set: usize, tiles: TileSnapshot },
 }
 
@@ -44,10 +45,15 @@ impl History {
 
     pub fn push(&mut self, change: Change) {
         self.undo.push(change);
-        if self.undo.len() > LIMIT {
-            self.undo.remove(0);
-        }
         self.redo.clear();
+        let bytes = |c: &Change| match c {
+            Change::Pixels { tiles, .. } => tiles.bytes(),
+            Change::Stack { .. } => 0,
+        };
+        let mut total: u64 = self.undo.iter().map(bytes).sum();
+        while self.undo.len() > 1 && (self.undo.len() > LIMIT || total > PIXEL_BUDGET) {
+            total -= bytes(&self.undo.remove(0));
+        }
     }
 
     /// Record any stack that changed since the last call. Call once a frame, only while no

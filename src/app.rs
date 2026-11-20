@@ -1,16 +1,18 @@
 //! Application state and the Graphite shell: top bar, full-bleed viewport, floating panels.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use eframe::egui_wgpu;
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
 
+use crate::brush::{self, BrushEngine, Dab};
 use crate::camera::OrbitCamera;
-use crate::history::History;
+use crate::history::{Change, History};
 use crate::mesh::{self, Mesh};
 use crate::pen::{PenInput, PressureCurve};
 use crate::renderer::{FrameParams, ViewMode, ViewportRenderer};
-use crate::texset::{self, BlendMode, Channels, Compositor, Fill, Layer, LayerKind, TextureSet};
+use crate::texset::{self, BlendMode, Channels, Compositor, Fill, Layer, LayerKind, Mask, TextureSet};
 use crate::theme::{self, *};
 use crate::{icons, widgets};
 
@@ -81,12 +83,32 @@ impl Tool {
     fn shows_brush_cursor(self) -> bool {
         !matches!(self, Tool::Fill | Tool::Picker)
     }
+
+    /// Tools that paint strokes.
+    fn strokes(self) -> bool {
+        matches!(self, Tool::Brush | Tool::Eraser | Tool::Mask)
+    }
+
+    /// Tools on the rail that don't work yet.
+    fn later(self) -> bool {
+        matches!(self, Tool::Smudge | Tool::Clone | Tool::Decal)
+    }
 }
+
+/// Dabs sit this fraction of the brush's diameter apart.
+const SPACING: f32 = 0.1;
 
 struct BrushSettings {
     size: f32,
     opacity: f32,
     flow: f32,
+    /// Fraction of the radius painted at full strength before the edge fades.
+    hardness: f32,
+    /// The material values the brush paints, alongside the colour.
+    rough: f32,
+    metal: f32,
+    /// 0.5 is flat.
+    height: f32,
     pen_size: bool,
     pen_opacity: bool,
     pen_tilt: bool,
@@ -102,7 +124,11 @@ impl Default for BrushSettings {
         Self {
             size: 64.0,
             opacity: 0.85,
-            flow: 0.6,
+            flow: 1.0,
+            hardness: 0.6,
+            rough: 0.5,
+            metal: 0.0,
+            height: 0.7,
             pen_size: true,
             pen_opacity: true,
             pen_tilt: false,
@@ -113,6 +139,20 @@ impl Default for BrushSettings {
             paint_height: false,
         }
     }
+}
+
+/// A stroke in progress.
+struct StrokeState {
+    set: usize,
+    /// The stroke paints the layer's mask rather than its pixels.
+    mask: bool,
+    paint: brush::Paint,
+    /// Where the path carries on from, in points.
+    last: Pos2,
+    /// Distance along the path to the next dab, in points.
+    next: f32,
+    /// Pen pressure (after the curve) at `last`.
+    pressure: f32,
 }
 
 enum LayerAction {
@@ -128,6 +168,8 @@ pub struct UmberApp {
     camera: OrbitCamera,
     mesh: Option<Mesh>,
     toast: Option<(String, f64)>,
+    /// Seconds since start, as of this frame.
+    now: f64,
 
     workspace: Workspace,
     tool: Tool,
@@ -139,6 +181,10 @@ pub struct UmberApp {
     colour_open: bool,
 
     compositor: Compositor,
+    brush_engine: BrushEngine,
+    stroke: Option<StrokeState>,
+    /// UV island of every triangle, worked out the first time the fill tool needs it.
+    islands: Option<Vec<u32>>,
     /// One texture set per mesh material.
     sets: Vec<TextureSet>,
     /// The set the layers panel shows and the brush paints.
@@ -158,12 +204,14 @@ impl UmberApp {
         log::info!("GPU: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
         let renderer = ViewportRenderer::new(&rs);
         let compositor = Compositor::new(&rs.device, &rs.queue);
+        let brush_engine = BrushEngine::new(&rs.device);
         let mut app = Self {
             rs,
             renderer,
             camera: OrbitCamera::default(),
             mesh: None,
             toast: None,
+            now: 0.0,
             workspace: Workspace::Paint,
             tool: Tool::Brush,
             brush: BrushSettings::default(),
@@ -173,6 +221,9 @@ impl UmberApp {
             secondary: Color32::from_rgb(0xe8, 0xcf, 0xa4),
             colour_open: false,
             compositor,
+            brush_engine,
+            stroke: None,
+            islands: None,
             sets: Vec::new(),
             active_set: 0,
             history: History::default(),
@@ -187,11 +238,20 @@ impl UmberApp {
     }
 
     fn set_mesh(&mut self, mesh: Mesh) {
+        if self.stroke.take().is_some() {
+            self.brush_engine.end(&self.rs.device, &self.rs.queue);
+        }
         let (device, queue) = (&self.rs.device, &self.rs.queue);
         self.sets = mesh.materials.iter().map(|m| self.compositor.new_set(device, queue, m)).collect();
         self.active_set = 0;
         self.history.clear();
+        self.islands = None;
         self.renderer.set_mesh(&self.rs, &mesh, &self.sets);
+        for (i, set) in self.sets.iter_mut().enumerate() {
+            if let Some(draw) = self.renderer.mesh_draw(i) {
+                self.compositor.set_islands(device, queue, set, draw.vertices, draw.indices, &draw.ranges);
+            }
+        }
         let (center, radius) = mesh.bounding_sphere();
         self.camera = OrbitCamera::default();
         self.camera.frame(center, radius);
@@ -282,6 +342,7 @@ impl UmberApp {
     }
 
     fn undo(&mut self) {
+        self.end_stroke();
         self.history.record_stack_changes(&mut self.sets);
         if let Some(set) = self.history.undo(&mut self.sets, &self.rs.device, &self.rs.queue) {
             self.active_set = set;
@@ -289,6 +350,7 @@ impl UmberApp {
     }
 
     fn redo(&mut self) {
+        self.end_stroke();
         self.history.record_stack_changes(&mut self.sets);
         if let Some(set) = self.history.redo(&mut self.sets, &self.rs.device, &self.rs.queue) {
             self.active_set = set;
@@ -372,14 +434,46 @@ impl UmberApp {
             }
         }
 
+        let size = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
+        let aspect = rect.width() / rect.height().max(1.0);
+        let (view, proj) = (self.camera.view(), self.camera.projection(aspect));
+
+        // The brush, fill and picker. Painting happens before compositing, so a dab shows up
+        // in the same frame it was laid.
+        let in_paint = self.workspace == Workspace::Paint && self.mesh.is_some();
+        let (primary_down, pressed, origin, moves) = ui.input(|i| {
+            let moves: Vec<Pos2> =
+                i.events.iter().filter_map(|e| if let egui::Event::PointerMoved(p) = e { Some(*p) } else { None }).collect();
+            (i.pointer.primary_down(), i.pointer.primary_pressed(), i.pointer.press_origin(), moves)
+        });
+        if self.stroke.is_some() && (!primary_down || !in_paint) {
+            self.end_stroke();
+        }
+        let cam = brush::View { view_proj: proj * view, eye: self.camera.eye(), size };
+        if in_paint && pressed && !alt && response.hovered() && self.stroke.is_none() {
+            if let Some(origin) = origin {
+                match self.tool {
+                    t if t.strokes() => {
+                        if self.begin_stroke(origin, rect) {
+                            self.stroke_frame(&[origin], rect, ppp, &cam);
+                        }
+                    }
+                    Tool::Fill => self.fill_at(origin, rect, shift, &cam),
+                    Tool::Picker => self.pick_at(origin, rect),
+                    t if t.later() => self.toast = Some((format!("{} comes later, with smart layers.", t.name()), self.now)),
+                    _ => {}
+                }
+            }
+        } else if self.stroke.is_some() {
+            self.stroke_frame(&moves, rect, ppp, &cam);
+        }
+
         for set in &mut self.sets {
             self.compositor.update(&self.rs.device, &self.rs.queue, set);
         }
-        let size = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
-        let aspect = rect.width() / rect.height().max(1.0);
         let params = FrameParams {
-            view: self.camera.view(),
-            proj: self.camera.projection(aspect),
+            view,
+            proj,
             eye: self.camera.eye(),
             light_yaw: self.light_yaw,
             view_mode: if self.workspace == Workspace::Uv { ViewMode::UvCheck } else { self.view_mode },
@@ -395,6 +489,8 @@ impl UmberApp {
                 self.brush_cursor(ui.painter(), pos);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             }
+        } else if self.workspace == Workspace::Paint && self.mesh.is_some() && !nav_drag && response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
 
         if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
@@ -410,14 +506,7 @@ impl UmberApp {
         let r = self.brush.size * 0.5;
         let light = Color32::from_rgb(0xf4, 0xf2, 0xee);
 
-        // Tilt squashes the dab across the direction the pen leans.
-        let (axis, squash) = if self.brush.pen_tilt && pen.active {
-            let t = Vec2::from(pen.sample.tilt);
-            let lean = t.length().min(1.0);
-            (if lean > 0.02 { t / t.length() } else { Vec2::X }, 1.0 - 0.6 * lean)
-        } else {
-            (Vec2::X, 1.0)
-        };
+        let (axis, squash) = self.tilt_shape(&pen);
         let ellipse = |radius: f32| -> Vec<Pos2> {
             let perp = axis.rot90();
             (0..64)
@@ -437,7 +526,268 @@ impl UmberApp {
         }
         p.add(egui::Shape::closed_line(ellipse(r + 1.0), Stroke::new(1.0, Color32::from_black_alpha(120))));
         p.add(egui::Shape::closed_line(ellipse(r), Stroke::new(1.5, light)));
+        if self.brush.hardness < 0.95 && r * self.brush.hardness > 3.0 {
+            p.add(egui::Shape::closed_line(ellipse(r * self.brush.hardness), Stroke::new(1.0, light.gamma_multiply(0.35))));
+        }
         p.circle_filled(pos, 1.5, light);
+    }
+
+
+    /// Tilt squashes the dab across the direction the pen leans: (axis, squash).
+    fn tilt_shape(&self, pen: &crate::pen::PenStatus) -> (Vec2, f32) {
+        if self.brush.pen_tilt && pen.active {
+            let t = Vec2::from(pen.sample.tilt);
+            let lean = t.length().min(1.0);
+            (if lean > 0.02 { t / t.length() } else { Vec2::X }, 1.0 - 0.6 * lean)
+        } else {
+            (Vec2::X, 1.0)
+        }
+    }
+
+    // ---------------------------------------------------------------- painting
+
+    /// The mesh under a point of the viewport.
+    fn pick(&self, pos: Pos2, rect: Rect) -> Option<mesh::Hit> {
+        let mesh = self.mesh.as_ref()?;
+        let x = (pos.x - rect.left()) / rect.width() * 2.0 - 1.0;
+        let y = 1.0 - (pos.y - rect.top()) / rect.height() * 2.0;
+        let inv = (self.camera.projection(rect.width() / rect.height().max(1.0)) * self.camera.view()).inverse();
+        let near = inv.project_point3(glam::Vec3::new(x, y, 0.0));
+        let far = inv.project_point3(glam::Vec3::new(x, y, 1.0));
+        mesh.raycast(near, (far - near).normalize())
+    }
+
+    /// Make the material under `pos` the one being painted, when the model has several.
+    fn activate_set_at(&mut self, pos: Pos2, rect: Rect) -> Option<mesh::Hit> {
+        let hit = self.pick(pos, rect);
+        if let (Some(h), Some(mesh)) = (&hit, &self.mesh) {
+            self.active_set = mesh.material_of(h.triangle).min(self.sets.len().saturating_sub(1));
+        }
+        hit
+    }
+
+    /// What the brush lays down, before the tool decides on mode and target.
+    fn paint_values(&self) -> brush::Paint {
+        let c = self.primary;
+        let b = &self.brush;
+        brush::Paint {
+            mode: brush::Mode::Paint,
+            colour: [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0],
+            material: [b.rough, b.metal, b.height],
+            channels: [b.paint_colour, b.paint_rough, b.paint_metal, b.paint_height],
+            hardness: b.hardness,
+            fill_opacity: b.opacity,
+        }
+    }
+
+    /// Get the selected layer ready for the current tool, adding a paint layer or a mask when
+    /// it needs one. Returns whether the stroke paints the mask, and what it lays down.
+    fn prepare_layer(&mut self) -> Option<(bool, brush::Paint)> {
+        let now = self.now;
+        let base = self.paint_values();
+        let set = self.sets.get_mut(self.active_set)?;
+        let is_paint = set.selected_layer().is_some_and(|l| l.pixels.is_some());
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        let ensure_mask = |set: &mut TextureSet| {
+            let layer = set.layers.get_mut(set.selected)?;
+            if layer.mask.is_none() {
+                layer.mask = Some(Rc::new(Mask::white(device, queue)));
+            }
+            Some(())
+        };
+        match self.tool {
+            Tool::Brush | Tool::Fill if !is_paint => {
+                self.add_layer(false);
+                let name = self.sets[self.active_set].selected_layer().map(|l| l.name.clone()).unwrap_or_default();
+                self.toast = Some((format!("Added {name} to paint on, so the fill layer below stays as it is."), now));
+                Some((false, base))
+            }
+            Tool::Brush | Tool::Fill => Some((false, base)),
+            Tool::Eraser if is_paint => Some((false, brush::Paint { mode: brush::Mode::Erase, ..base })),
+            Tool::Eraser => {
+                ensure_mask(set)?;
+                self.toast = Some(("Erasing a fill layer paints its mask, so the Mask tool can bring it back.".into(), now));
+                Some((true, brush::Paint { colour: [0.0; 3], ..base }))
+            }
+            Tool::Mask => {
+                ensure_mask(set)?;
+                let grey = 0.2126 * base.colour[0] + 0.7152 * base.colour[1] + 0.0722 * base.colour[2];
+                Some((true, brush::Paint { colour: [grey; 3], ..base }))
+            }
+            _ => None,
+        }
+    }
+
+    /// Start a stroke on the selected layer of the material under `pos`.
+    fn begin_stroke(&mut self, pos: Pos2, rect: Rect) -> bool {
+        if self.sets.len() > 1 {
+            self.activate_set_at(pos, rect);
+        }
+        // Anything changed before the stroke is its own undo step, and so is a layer or mask
+        // the stroke had to add.
+        self.history.record_stack_changes(&mut self.sets);
+        let Some((mask, paint)) = self.prepare_layer() else { return false };
+        self.history.record_stack_changes(&mut self.sets);
+
+        let set = self.active_set;
+        let Some(layer) = self.sets[set].selected_layer() else { return false };
+        let target = match (mask, &layer.mask, &layer.pixels) {
+            (true, Some(m), _) => brush::Target::Mask(m),
+            (false, _, Some(p)) => brush::Target::Layer(p),
+            _ => return false,
+        };
+        if !layer.visible {
+            self.toast = Some((format!("{} is hidden, so you won't see this stroke until you show it.", layer.name), self.now));
+        }
+        self.brush_engine.begin(&self.rs.device, &self.rs.queue, target);
+        let pressure = self.pressure();
+        self.stroke = Some(StrokeState { set, mask, paint, last: pos, next: 0.0, pressure });
+        true
+    }
+
+    /// Pen pressure through the curve, or full pressure for a mouse.
+    fn pressure(&self) -> f32 {
+        let pen = self.pen.status();
+        if pen.active { self.brush.curve.apply(pen.sample.pressure) } else { 1.0 }
+    }
+
+    /// Lay dabs along the pointer's path since last frame.
+    fn stroke_frame(&mut self, points: &[Pos2], rect: Rect, ppp: f32, cam: &brush::View) {
+        let pen = self.pen.status();
+        let (axis, squash) = self.tilt_shape(&pen);
+        let p1 = self.pressure();
+        let b = &self.brush;
+        let Some(st) = &mut self.stroke else { return };
+        let p0 = st.pressure;
+        let size_k = |k: f32| if b.pen_size { k } else { 1.0 };
+        let alpha_k = |k: f32| if b.pen_opacity { k } else { 1.0 };
+        let spacing = |k: f32| (b.size * size_k(k) * SPACING).max(0.5);
+        // Flow is what one pass of the brush over a texel lays down, so it's shared out over
+        // the dabs that cover it. A texel near the middle of a stroke sits under about
+        // 1 / SPACING dabs; giving each a big flat share would show every dab as a ring.
+        let flow = 1.0 - (1.0 - b.flow.clamp(0.0, 1.0)).powf(SPACING * 2.0);
+
+        let mut total = 0.0;
+        let mut prev = st.last;
+        for p in points {
+            total += (*p - prev).length();
+            prev = *p;
+        }
+        let mut dabs = Vec::new();
+        let mut travelled = 0.0;
+        let mut from = st.last;
+        for &p in points {
+            let seg = p - from;
+            let len = seg.length();
+            let mut d = st.next;
+            while d <= len {
+                let at = if len > 0.0 { from + seg * (d / len) } else { from };
+                let k = if total > 0.0 { p0 + (p1 - p0) * ((travelled + d) / total) } else { p1 };
+                dabs.push(Dab {
+                    center: [(at.x - rect.left()) * ppp, (at.y - rect.top()) * ppp],
+                    axis: [axis.x, axis.y],
+                    radius: b.size * 0.5 * size_k(k) * ppp,
+                    squash,
+                    strength: b.opacity * alpha_k(k),
+                    flow,
+                });
+                d += spacing(k);
+            }
+            st.next = d - len;
+            travelled += len;
+            from = p;
+        }
+        st.last = from;
+        st.pressure = p1;
+        if dabs.is_empty() {
+            return;
+        }
+        let (set, paint) = (st.set, st.paint);
+        if let Some(draw) = self.renderer.mesh_draw(set) {
+            self.brush_engine.paint(&self.rs.device, &self.rs.queue, &draw, cam, &paint, &dabs);
+            self.sets[set].dirty = true;
+        }
+    }
+
+    /// Finish the stroke and keep it as one undo step.
+    fn end_stroke(&mut self) {
+        let Some(st) = self.stroke.take() else { return };
+        let Some(tiles) = self.brush_engine.end(&self.rs.device, &self.rs.queue) else { return };
+        self.history.push(Change::Pixels { set: st.set, tiles });
+        if !st.mask && st.paint.mode == brush::Mode::Paint && st.paint.channels[0] {
+            let set = &mut self.sets[st.set];
+            if let Some(layer) = set.layers.get_mut(set.selected) {
+                layer.swatch.get_or_insert(self.primary);
+            }
+        }
+    }
+
+    /// Fill the UV island under `pos` (or with `whole`, the whole material) on the selected
+    /// paint layer.
+    fn fill_at(&mut self, pos: Pos2, rect: Rect, whole: bool, cam: &brush::View) {
+        let Some(hit) = self.activate_set_at(pos, rect) else { return };
+        self.history.record_stack_changes(&mut self.sets);
+        let Some((_, paint)) = self.prepare_layer() else { return };
+        self.history.record_stack_changes(&mut self.sets);
+        let set = self.active_set;
+        let (Some(mesh), Some(draw)) = (&self.mesh, self.renderer.mesh_draw(set)) else { return };
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+
+        let island_buffer;
+        let draw = if whole {
+            draw
+        } else {
+            let islands = self.islands.get_or_insert_with(|| mesh.uv_islands());
+            let island = islands[hit.triangle];
+            let mut indices = Vec::new();
+            for r in &draw.ranges {
+                for tri in (r.start / 3)..(r.end / 3) {
+                    if islands[tri as usize] == island {
+                        indices.extend_from_slice(&mesh.indices[tri as usize * 3..tri as usize * 3 + 3]);
+                    }
+                }
+            }
+            island_buffer = eframe::egui_wgpu::wgpu::util::DeviceExt::create_buffer_init(
+                device,
+                &eframe::egui_wgpu::wgpu::util::BufferInitDescriptor {
+                    label: Some("fill island"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: eframe::egui_wgpu::wgpu::BufferUsages::INDEX,
+                },
+            );
+            #[allow(clippy::single_range_in_vec_init)] // One range, in a list of them.
+            brush::MeshDraw { vertices: draw.vertices, indices: &island_buffer, ranges: vec![0..indices.len() as u32] }
+        };
+        let Some(pixels) = self.sets[set].selected_layer().and_then(|l| l.pixels.as_deref()) else { return };
+        self.brush_engine.begin(device, queue, brush::Target::Layer(pixels));
+        self.brush_engine.paint(device, queue, &draw, cam, &brush::Paint { mode: brush::Mode::Fill, ..paint }, &[]);
+        if let Some(tiles) = self.brush_engine.end(device, queue) {
+            self.history.push(Change::Pixels { set, tiles });
+        }
+        self.sets[set].dirty = true;
+        if paint.channels[0] {
+            let s = &mut self.sets[set];
+            if let Some(layer) = s.layers.get_mut(s.selected) {
+                layer.swatch.get_or_insert(self.primary);
+            }
+        }
+    }
+
+    /// Pick up the colour and material under `pos`, as the stack shows them.
+    fn pick_at(&mut self, pos: Pos2, rect: Rect) {
+        let Some(hit) = self.activate_set_at(pos, rect) else { return };
+        let (Some(mesh), Some(set)) = (&self.mesh, self.sets.get(self.active_set)) else { return };
+        let uv = mesh.uv_at(&hit);
+        let texel = |v: f32| ((v.rem_euclid(1.0) * texset::SIZE as f32) as u32).min(texset::SIZE - 1);
+        let (x, y) = (texel(uv.x), texel(uv.y));
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        let [color, mat, _] = set.output_textures();
+        let c = texset::read_texel(device, queue, color, x, y, 4);
+        let m = texset::read_texel(device, queue, mat, x, y, 8);
+        self.primary = Color32::from_rgb(c[0], c[1], c[2]);
+        self.brush.rough = texset::f16_to_f32(m[0], m[1]);
+        self.brush.metal = texset::f16_to_f32(m[2], m[3]);
+        self.brush.height = texset::f16_to_f32(m[4], m[5]);
     }
 
     // ---------------------------------------------------------------- floating panels
@@ -471,9 +821,14 @@ impl UmberApp {
             });
         });
         if self.colour_open {
-            let pos = resp.response.rect.right_bottom() + egui::vec2(8.0, -300.0);
+            // Beside the rail, just under the brush bar (which can be two rows tall).
+            let pos = egui::pos2(resp.response.rect.right() + 8.0, vp.top() + 120.0);
             egui::Area::new(egui::Id::unique("colour_popover")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
                 theme::panel_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
+                    let w = 220.0;
+                    ui.set_width(w);
+                    // The picker sizes itself from the slider width.
+                    ui.spacing_mut().slider_width = w;
                     ui.horizontal(|ui| {
                         widgets::caps_label(ui, "Colour");
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -483,6 +838,18 @@ impl UmberApp {
                         });
                     });
                     egui::color_picker::color_picker_color32(ui, &mut self.primary, egui::color_picker::Alpha::Opaque);
+                    ui.add_space(6.0);
+                    let b = &mut self.brush;
+                    for (on, label, value, tip) in [
+                        (b.paint_rough, "Roughness", &mut b.rough, "Turn on Rough in the brush bar to paint it"),
+                        (b.paint_metal, "Metalness", &mut b.metal, "Turn on Metal in the brush bar to paint it"),
+                        (b.paint_height, "Height", &mut b.height, "Turn on Height in the brush bar to paint it"),
+                    ] {
+                        ui.add_enabled_ui(on, |ui| {
+                            let r = labelled_slider(ui, label, value, 0.0..=1.0, w, |v| format!("{v:.2}"));
+                            r.on_disabled_hover_text(tip);
+                        });
+                    }
                 });
             });
         }
@@ -494,20 +861,35 @@ impl UmberApp {
         egui::Area::new(egui::Id::unique("brush_bar")).order(Order::Foreground).fixed_pos(vp.min + egui::vec2(92.0, 16.0)).show(ctx, |ui| {
             theme::panel_frame().inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
                 // One row when it fits, otherwise the pen and channel toggles drop to a second row.
-                let one_row = max_w >= 1180.0;
+                let one_row = max_w >= 1360.0;
                 ui.spacing_mut().item_spacing = egui::vec2(10.0, 8.0);
+                let strokes = self.tool.strokes();
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(self.tool.name()).font(theme::medium(13.0)));
                     widgets::vdivider(ui, 24.0);
-                    slider_with_value(ui, "Size", &mut self.brush.size, 1.0..=500.0, 110.0, |v| format!("{v:.0}px"));
-                    slider_with_value(ui, "Opacity", &mut self.brush.opacity, 0.0..=1.0, 80.0, pct);
-                    slider_with_value(ui, "Flow", &mut self.brush.flow, 0.0..=1.0, 64.0, pct);
-                    if one_row {
-                        widgets::vdivider(ui, 24.0);
-                        self.brush_toggles(ui);
+                    match self.tool {
+                        t if t.strokes() => {
+                            slider_with_value(ui, "Size", &mut self.brush.size, 1.0..=500.0, 110.0, |v| format!("{v:.0}px"));
+                            slider_with_value(ui, "Opacity", &mut self.brush.opacity, 0.0..=1.0, 80.0, pct);
+                            slider_with_value(ui, "Flow", &mut self.brush.flow, 0.0..=1.0, 64.0, pct);
+                            slider_with_value(ui, "Hardness", &mut self.brush.hardness, 0.0..=1.0, 64.0, pct);
+                            if one_row {
+                                widgets::vdivider(ui, 24.0);
+                                self.brush_toggles(ui);
+                            }
+                        }
+                        Tool::Fill => {
+                            slider_with_value(ui, "Opacity", &mut self.brush.opacity, 0.0..=1.0, 80.0, pct);
+                            widgets::vdivider(ui, 24.0);
+                            self.channel_toggles(ui);
+                            widgets::vdivider(ui, 24.0);
+                            hint(ui, "Click fills a UV island · Shift+click fills the whole material");
+                        }
+                        Tool::Picker => hint(ui, "Click the model to pick up its colour and material"),
+                        _ => hint(ui, "Comes later, with smart layers"),
                     }
                 });
-                if !one_row {
+                if strokes && !one_row {
                     ui.horizontal(|ui| self.brush_toggles(ui));
                 }
             });
@@ -536,6 +918,15 @@ impl UmberApp {
         widgets::chip(ui, "Opacity", &mut self.brush.pen_opacity).on_hover_text("Pen pressure changes opacity");
         widgets::chip(ui, "Tilt", &mut self.brush.pen_tilt).on_hover_text("Pen tilt flattens the brush");
         widgets::vdivider(ui, 24.0);
+        if self.tool == Tool::Mask {
+            hint(ui, "Dark hides the layer, light shows it");
+        } else {
+            self.channel_toggles(ui);
+        }
+    }
+
+    /// Which channels the brush and fill paint.
+    fn channel_toggles(&mut self, ui: &mut egui::Ui) {
         widgets::caps_label(ui, "Paints");
         widgets::chip(ui, "Colour", &mut self.brush.paint_colour).on_hover_text("This brush paints base colour");
         widgets::chip(ui, "Rough", &mut self.brush.paint_rough).on_hover_text("This brush paints roughness");
@@ -740,6 +1131,32 @@ impl UmberApp {
         });
         ui.add_space(4.0);
         labelled_slider(ui, "Opacity", &mut layer.opacity, 0.0..=1.0, w, pct);
+        let mut mask_tool = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Mask").color(TEXT_2));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if layer.mask.is_some() {
+                    if widgets::icon_action(ui, icons::TRASH, true, 28.0, "Remove the mask").clicked() {
+                        layer.mask = None;
+                    }
+                    widgets::chip(ui, "Invert", &mut layer.mask_invert).on_hover_text("Swap what the mask hides and shows");
+                    if widgets::chip(ui, "Paint", &mut (self.tool == Tool::Mask)).on_hover_text("Paint the mask (M)").clicked() {
+                        mask_tool = true;
+                    }
+                } else if widgets::button(ui, "Add mask", false, 28.0)
+                    .on_hover_text("Hide parts of this layer by painting with the Mask tool (M)")
+                    .clicked()
+                {
+                    layer.mask = Some(Rc::new(Mask::white(device, queue)));
+                    mask_tool = true;
+                }
+            });
+        });
+        if mask_tool {
+            self.tool = Tool::Mask;
+        }
+        ui.add_space(4.0);
 
         if let LayerKind::Fill(f) = &mut layer.kind {
             ui.add_space(2.0);
@@ -920,6 +1337,7 @@ impl eframe::App for UmberApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
+        self.now = now;
         self.handle_shortcuts(&ctx, now);
 
         egui::Panel::top("top_bar")
@@ -986,6 +1404,11 @@ fn labelled_slider(
     let r = widgets::track_slider(ui, value, range, width);
     ui.add_space(4.0);
     r
+}
+
+/// A quiet line of help text in a bar.
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).color(TEXT_3).size(12.0));
 }
 
 fn pct(v: f32) -> String {

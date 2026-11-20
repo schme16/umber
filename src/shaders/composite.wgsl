@@ -101,9 +101,24 @@ struct ResolveParams {
 @group(0) @binding(10) var out_color: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(11) var out_mat: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(12) var out_normal: texture_storage_2d<rgba8unorm, write>;
+// For each texel, the nearest texel inside a UV island (packed x | y << 16), so the maps are
+// padded past island edges. A 1x1 texture stands in when the set has no islands worked out.
+@group(0) @binding(13) var padding: texture_2d<u32>;
+
+fn padded(c: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
+    let cc = clamp(c, vec2<i32>(0), dims - vec2<i32>(1));
+    if (any(vec2<i32>(textureDimensions(padding)) != dims)) {
+        return cc;
+    }
+    let v = textureLoad(padding, cc, 0).r;
+    if (v == 0xffffffffu) {
+        return cc;
+    }
+    return vec2<i32>(i32(v & 0xffffu), i32(v >> 16u));
+}
 
 fn height_at(c: vec2<i32>, dims: vec2<i32>) -> f32 {
-    return textureLoad(src_mat, clamp(c, vec2<i32>(0), dims - vec2<i32>(1)), 0).z;
+    return textureLoad(src_mat, padded(c, dims), 0).z;
 }
 
 @compute @workgroup_size(8, 8)
@@ -114,8 +129,9 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let dims = vec2<i32>(udims);
     let c = vec2<i32>(gid.xy);
-    let col = textureLoad(src_color, c, 0);
-    let mat = textureLoad(src_mat, c, 0);
+    let src_px = padded(c, dims);
+    let col = textureLoad(src_color, src_px, 0);
+    let mat = textureLoad(src_mat, src_px, 0);
     textureStore(out_color, c, vec4<f32>(clamp(col.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
     textureStore(out_mat, c, clamp(mat, vec4<f32>(0.0), vec4<f32>(1.0)));
 
