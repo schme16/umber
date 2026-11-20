@@ -377,6 +377,8 @@ impl Tip {
 struct Prefs {
     tips_seen: Vec<String>,
     tips_off: bool,
+    /// Image files the brush has painted with, newest first.
+    recent_textures: Vec<PathBuf>,
 }
 
 /// Remembers which tips have been seen, in `$XDG_CONFIG_HOME/umber/prefs.json`.
@@ -441,7 +443,21 @@ impl Tips {
     }
 
     pub fn reset(&mut self) {
-        self.prefs = Prefs::default();
+        self.prefs = Prefs { recent_textures: std::mem::take(&mut self.prefs.recent_textures), ..Prefs::default() };
+        self.write();
+    }
+
+    pub fn recent_textures(&self) -> &[PathBuf] {
+        &self.prefs.recent_textures
+    }
+
+    /// Put `path` at the front of the recent brush textures (or take it off, when it's gone).
+    pub fn remember_texture(&mut self, path: &std::path::Path, keep: bool) {
+        self.prefs.recent_textures.retain(|p| p != path);
+        if keep {
+            self.prefs.recent_textures.insert(0, path.to_owned());
+            self.prefs.recent_textures.truncate(8);
+        }
         self.write();
     }
 }

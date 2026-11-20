@@ -57,6 +57,18 @@ pub struct Paint {
     pub hardness: f32,
     /// Fill mode only: the coverage the fill lays down.
     pub fill_opacity: f32,
+    /// Paint with the brush texture (see [`BrushEngine::set_texture`]) instead of `colour`.
+    pub texture: Option<TexturePaint>,
+}
+
+/// How the brush texture is laid on.
+#[derive(Clone, Copy, Debug)]
+pub struct TexturePaint {
+    pub projection: crate::brush_texture::Projection,
+    /// Size of one repeat: model units (surface), UV units (UV) or physical pixels (view).
+    pub tile: f32,
+    /// Radians.
+    pub rotation: f32,
 }
 
 /// Where the camera is, for projecting texels onto the screen.
@@ -91,6 +103,7 @@ struct Uniforms {
     material: [f32; 4],
     channels: [f32; 4],
     shape: [f32; 4],
+    tex: [f32; 4],
 }
 
 struct Active {
@@ -123,11 +136,14 @@ pub struct BrushEngine {
     base: [(wgpu::Texture, wgpu::TextureView); 3],
     dist: Option<DistTarget>,
     no_dist: wgpu::TextureView,
+    /// The brush texture's colour and height.
+    texture: (wgpu::TextureView, wgpu::TextureView),
+    sampler: wgpu::Sampler,
     active: Option<Active>,
 }
 
 impl BrushEngine {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("brush"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/brush.wgsl").into()),
@@ -145,6 +161,16 @@ impl BrushEngine {
             visibility: frag,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let filterable = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
@@ -176,6 +202,14 @@ impl BrushEngine {
                 tex(5),
                 tex(6),
                 storage_buffer(7, false),
+                filterable(8),
+                filterable(9),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: frag,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         // The distance pass renders into the texture the paint pass reads, so it gets a layout
@@ -282,6 +316,19 @@ impl BrushEngine {
             (t, v)
         });
 
+        let white = crate::mesh::Image { width: 1, height: 1, rgba: vec![255; 4] };
+        let plain = crate::brush_texture::GpuTexture::upload(device, queue, &crate::brush_texture::Pixels { colour: white.clone(), height: white });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("brush texture"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+
         Self {
             layout,
             layer_pipeline,
@@ -296,8 +343,15 @@ impl BrushEngine {
             base,
             dist: None,
             no_dist: texture("no distance", DIST_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING).create_view(&Default::default()),
+            texture: (plain.colour, plain.height),
+            sampler,
             active: None,
         }
+    }
+
+    /// The texture strokes paint with when [`Paint::texture`] is set.
+    pub fn set_texture(&mut self, texture: &crate::brush_texture::GpuTexture) {
+        self.texture = (texture.colour.clone(), texture.height.clone());
     }
 
     /// Start a stroke on `target`: remember how it looks now and clear the stroke buffer.
@@ -340,6 +394,10 @@ impl BrushEngine {
             material: [paint.material[0], paint.material[1], paint.material[2], 0.0],
             channels: paint.channels.map(|c| if c { 1.0 } else { 0.0 }),
             shape: [paint.hardness, paint.fill_opacity, 0.0, 0.0],
+            tex: match paint.texture {
+                Some(t) => [t.projection.code() as f32, 1.0 / t.tile.max(1e-6), t.rotation.cos(), t.rotation.sin()],
+                None => [0.0, 1.0, 1.0, 0.0],
+            },
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         if paint.mode != Mode::Fill {
@@ -361,6 +419,9 @@ impl BrushEngine {
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.base[1].1) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.base[2].1) },
                 wgpu::BindGroupEntry { binding: 7, resource: self.tiles.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.texture.0) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.texture.1) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
 
@@ -515,7 +576,7 @@ mod tests {
     }
 
     fn paint() -> Paint {
-        Paint { mode: Mode::Paint, colour: [1.0, 0.0, 0.0], material: [0.2, 1.0, 0.5], channels: [true, true, false, false], hardness: 0.8, fill_opacity: 1.0 }
+        Paint { mode: Mode::Paint, colour: [1.0, 0.0, 0.0], material: [0.2, 1.0, 0.5], channels: [true, true, false, false], hardness: 0.8, fill_opacity: 1.0, texture: None }
     }
 
     #[test]
@@ -524,7 +585,7 @@ mod tests {
         let (vb, ib, view) = quad(&device);
         let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
         let pixels = texset::PaintPixels::new(&device);
-        let mut brush = BrushEngine::new(&device);
+        let mut brush = BrushEngine::new(&device, &queue);
         brush.begin(&device, &queue, Target::Layer(&pixels));
         let dab = Dab { center: [128.0, 128.0], axis: [1.0, 0.0], radius: 20.0, squash: 1.0, strength: 1.0, flow: 1.0 };
         brush.paint(&device, &queue, &mesh, &view, &paint(), &[dab]);
@@ -547,7 +608,7 @@ mod tests {
         let (vb, ib, view) = quad(&device);
         let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
         let pixels = texset::PaintPixels::new(&device);
-        let mut brush = BrushEngine::new(&device);
+        let mut brush = BrushEngine::new(&device, &queue);
         let mid = SIZE / 2;
         let half = Dab { center: [128.0, 128.0], axis: [1.0, 0.0], radius: 20.0, squash: 1.0, strength: 0.5, flow: 1.0 };
 
@@ -568,6 +629,38 @@ mod tests {
     }
 
     #[test]
+    fn texture_paints_its_colours_and_skips_see_through_parts() {
+        let (device, queue) = gpu();
+        let (vb, ib, view) = quad(&device);
+        let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
+        // 8 x 8: the left half opaque red, the right half see-through blue.
+        let mut rgba = Vec::new();
+        for _ in 0..8 {
+            for x in 0..8 {
+                rgba.extend_from_slice(if x < 4 { &[255, 0, 0, 255] } else { &[0, 0, 255, 0] });
+            }
+        }
+        let img = crate::mesh::Image { width: 8, height: 8, rgba };
+        let tex = crate::brush_texture::GpuTexture::upload(&device, &queue, &crate::brush_texture::Pixels::from_image(img));
+        let pixels = texset::PaintPixels::new(&device);
+        let mut brush = BrushEngine::new(&device, &queue);
+        brush.set_texture(&tex);
+        let textured = Paint {
+            mode: Mode::Fill,
+            colour: [0.0, 1.0, 0.0],
+            texture: Some(TexturePaint { projection: crate::brush_texture::Projection::Uv, tile: 1.0, rotation: 0.0 }),
+            ..paint()
+        };
+        brush.begin(&device, &queue, Target::Layer(&pixels));
+        brush.paint(&device, &queue, &mesh, &view, &textured, &[]);
+        let left = read_texel(&device, &queue, &pixels.color, SIZE / 4, SIZE / 2, 4);
+        assert_eq!(left, vec![255, 0, 0, 255], "the texture's red, not the brush colour");
+        let right = read_texel(&device, &queue, &pixels.color, SIZE * 3 / 4, SIZE / 2, 4);
+        assert_eq!(right[3], 0, "nothing lands where the texture is see-through");
+        brush.end(&device, &queue);
+    }
+
+    #[test]
     fn hidden_surfaces_are_not_painted() {
         let (device, queue) = gpu();
         let (_, _, view) = quad(&device);
@@ -580,7 +673,7 @@ mod tests {
         let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&idx), usage: wgpu::BufferUsages::INDEX });
         let mesh = MeshDraw { vertices: &vb, indices: &ib, ranges: vec![0..6] };
         let pixels = texset::PaintPixels::new(&device);
-        let mut brush = BrushEngine::new(&device);
+        let mut brush = BrushEngine::new(&device, &queue);
         brush.begin(&device, &queue, Target::Layer(&pixels));
         // Covers the whole view.
         let dab = Dab { center: [128.0, 128.0], axis: [1.0, 0.0], radius: 400.0, squash: 1.0, strength: 1.0, flow: 1.0 };

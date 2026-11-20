@@ -10,6 +10,7 @@ use eframe::egui_wgpu::wgpu::util::DeviceExt;
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
 
 use crate::brush::{self, BrushEngine, Dab};
+use crate::brush_texture::{self, Projection, Source};
 use crate::camera::OrbitCamera;
 use crate::commands::{self, Cmd};
 use crate::export;
@@ -165,6 +166,15 @@ struct BrushSettings {
     paint_rough: bool,
     paint_metal: bool,
     paint_height: bool,
+    /// Paint with `texture` rather than the colour.
+    use_texture: bool,
+    /// The last texture chosen, kept while painting with colour so switching back is one tap.
+    texture: Option<Source>,
+    projection: Projection,
+    /// Times the projection's own size; bigger is a bigger pattern.
+    texture_scale: f32,
+    /// Degrees.
+    texture_turn: f32,
 }
 
 impl Default for BrushSettings {
@@ -185,6 +195,11 @@ impl Default for BrushSettings {
             paint_rough: true,
             paint_metal: false,
             paint_height: false,
+            use_texture: false,
+            texture: None,
+            projection: Projection::Surface,
+            texture_scale: 1.0,
+            texture_turn: 0.0,
         }
     }
 }
@@ -266,6 +281,12 @@ pub struct UmberApp {
 
     compositor: Compositor,
     brush_engine: BrushEngine,
+    /// The brush texture on the GPU, what it was made from, and its thumbnail.
+    brush_texture: Option<(Source, egui::TextureHandle, u64)>,
+    /// Thumbnails for the texture picker, made the first time it shows each one, and the mesh
+    /// generation the model's own textures were taken from.
+    texture_thumbs: Vec<(Source, egui::TextureHandle)>,
+    thumbs_generation: u64,
     stroke: Option<StrokeState>,
     /// UV island of every triangle, worked out the first time the fill tool needs it.
     islands: Option<Vec<u32>>,
@@ -342,7 +363,7 @@ impl UmberApp {
         log::info!("GPU: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
         let renderer = ViewportRenderer::new(&rs);
         let compositor = Compositor::new(&rs.device, &rs.queue);
-        let brush_engine = BrushEngine::new(&rs.device);
+        let brush_engine = BrushEngine::new(&rs.device, &rs.queue);
         let mut app = Self {
             ctx: cc.egui_ctx.clone(),
             rs,
@@ -361,6 +382,9 @@ impl UmberApp {
             colour_open: false,
             compositor,
             brush_engine,
+            brush_texture: None,
+            texture_thumbs: Vec::new(),
+            thumbs_generation: 0,
             stroke: None,
             islands: None,
             sets: Vec::new(),
@@ -1212,6 +1236,7 @@ impl UmberApp {
             Cmd::PaintRough => b.paint_rough,
             Cmd::PaintMetal => b.paint_metal,
             Cmd::PaintHeight => b.paint_height,
+            Cmd::BrushTexture => b.use_texture,
             _ => return None,
         })
     }
@@ -1241,6 +1266,13 @@ impl UmberApp {
                 self.workspace = Workspace::Paint;
                 self.colour_open = true;
             }
+            Cmd::BrushTexture => {
+                self.workspace = Workspace::Paint;
+                self.colour_open = true;
+                self.brush.use_texture = true;
+                self.sync_brush_texture();
+            }
+            Cmd::OpenBrushTexture => self.open_brush_texture(),
             Cmd::PenSettings => {
                 // The curve lives in the brush bar, which shows for the painting tools.
                 self.workspace = Workspace::Paint;
@@ -1505,7 +1537,7 @@ impl UmberApp {
         if in_paint && pressed && !hand && response.hovered() && self.stroke.is_none() && !has_uvs {
             self.no_uv_offer_dismissed = false;
             self.toast = Some(("This model has no UVs yet, so there's nowhere for paint to go. Auto-unwrap it first.".into(), self.now));
-        } else if in_paint && pressed && !hand && response.hovered() && self.stroke.is_none() {
+        } else if in_paint && pressed && !hand && response.hovered() && self.stroke.is_none() && !self.colour_open {
             if let Some(origin) = origin {
                 match self.tool {
                     t if t.strokes() => {
@@ -1634,7 +1666,124 @@ impl UmberApp {
             channels: [b.paint_colour, b.paint_rough, b.paint_metal, b.paint_height],
             hardness: b.hardness,
             fill_opacity: b.opacity,
+            texture: self.texture_paint(),
         }
+    }
+
+    /// How the brush texture is laid on, when the brush paints with one.
+    fn texture_paint(&self) -> Option<brush::TexturePaint> {
+        let b = &self.brush;
+        let loaded = self.brush_texture.as_ref().is_some_and(|(s, _, _)| Some(s) == b.texture.as_ref());
+        if !b.use_texture || !loaded {
+            return None;
+        }
+        let size = self.mesh.as_ref().map_or(1.0, |m| {
+            let (lo, hi) = m.bounds();
+            (hi - lo).length()
+        });
+        Some(brush::TexturePaint {
+            projection: b.projection,
+            tile: b.projection.tile(size, self.ctx.pixels_per_point()) * b.texture_scale,
+            rotation: b.texture_turn.to_radians(),
+        })
+    }
+
+    /// The pixels of a brush texture source.
+    fn texture_pixels(&self, source: &Source) -> anyhow::Result<brush_texture::Pixels> {
+        match source {
+            Source::Pattern(p) => Ok(brush_texture::pattern(*p)),
+            Source::Model(i) => {
+                let img = self.mesh.as_ref().and_then(|m| m.materials.get(*i)).and_then(|m| m.base_color_texture.clone());
+                img.map(brush_texture::Pixels::from_image).ok_or_else(|| anyhow::anyhow!("the model has no texture there"))
+            }
+            Source::File(path) => brush_texture::load_file(path),
+        }
+    }
+
+    /// Paint with `source` from now on.
+    fn choose_texture(&mut self, source: Source) {
+        match self.texture_pixels(&source) {
+            Ok(px) => {
+                let gpu = brush_texture::GpuTexture::upload(&self.rs.device, &self.rs.queue, &px);
+                self.brush_engine.set_texture(&gpu);
+                let thumb = self.ctx.load_texture("brush texture", brush_texture::thumbnail(&px.colour, 64), egui::TextureOptions::LINEAR);
+                if let Source::File(path) = &source {
+                    self.tips.remember_texture(path, true);
+                }
+                self.brush_texture = Some((source.clone(), thumb, self.mesh_generation));
+                self.brush.texture = Some(source);
+                self.brush.use_texture = true;
+            }
+            Err(e) => {
+                let name = source.name(self.mesh.as_ref().map_or(&[], |m| &m.materials));
+                if let Source::File(path) = &source {
+                    self.tips.remember_texture(path, path.exists());
+                }
+                self.toast = Some((format!("Couldn't paint with {name}: {e}"), self.now));
+                if self.brush.texture.as_ref() == Some(&source) {
+                    self.brush.texture = None;
+                    self.brush.use_texture = false;
+                }
+            }
+        }
+    }
+
+    /// Load the brush texture the settings ask for, if it isn't already (after opening a
+    /// project, say).
+    fn sync_brush_texture(&mut self) {
+        if !self.brush.use_texture {
+            return;
+        }
+        match self.brush.texture.clone() {
+            None => self.choose_texture(Source::Pattern(brush_texture::Pattern::Bricks)),
+            // The model's own textures change with the model.
+            Some(src)
+                if self.brush_texture.as_ref().is_none_or(|(s, _, generation)| {
+                    *s != src || (matches!(s, Source::Model(_)) && *generation != self.mesh_generation)
+                }) =>
+            {
+                self.choose_texture(src)
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn open_brush_texture(&mut self) {
+        let start = self.tips.recent_textures().first().and_then(|p| p.parent()).map(Path::to_owned);
+        let mut dialog = self.dialog().set_title("Paint with an image").add_filter("Images", &["png", "jpg", "jpeg"]);
+        if let Some(dir) = start {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.choose_texture(Source::File(path));
+            self.workspace = Workspace::Paint;
+            self.colour_open = true;
+        }
+    }
+
+    /// Every texture the picker offers: patterns, the model's own, then recent images.
+    fn texture_choices(&self) -> Vec<Source> {
+        let mut out: Vec<Source> = brush_texture::Pattern::ALL.into_iter().map(Source::Pattern).collect();
+        if let Some(mesh) = &self.mesh {
+            out.extend(mesh.materials.iter().enumerate().filter(|(_, m)| m.base_color_texture.is_some()).map(|(i, _)| Source::Model(i)));
+        }
+        out.extend(self.tips.recent_textures().iter().cloned().map(Source::File));
+        out
+    }
+
+    /// The picker's thumbnail for `source`, made the first time it's asked for.
+    fn texture_thumb(&mut self, source: &Source) -> Option<egui::TextureHandle> {
+        if self.thumbs_generation != self.mesh_generation {
+            self.texture_thumbs.retain(|(s, _)| !matches!(s, Source::Model(_)));
+            self.thumbs_generation = self.mesh_generation;
+        }
+        if let Some((_, t)) = self.texture_thumbs.iter().find(|(s, _)| s == source) {
+            return Some(t.clone());
+        }
+        let px = self.texture_pixels(source).ok()?;
+        let t = self.ctx.load_texture("texture thumb", brush_texture::thumbnail(&px.colour, 96), egui::TextureOptions::LINEAR);
+        self.texture_thumbs.push((source.clone(), t.clone()));
+        Some(t)
     }
 
     /// Get the selected layer ready for the current tool, adding a paint layer or a mask when
@@ -1660,11 +1809,11 @@ impl UmberApp {
                 Some((false, base))
             }
             Tool::Brush | Tool::Fill => Some((false, base)),
-            Tool::Eraser if is_paint => Some((false, brush::Paint { mode: brush::Mode::Erase, ..base })),
+            Tool::Eraser if is_paint => Some((false, brush::Paint { mode: brush::Mode::Erase, texture: None, ..base })),
             Tool::Eraser => {
                 ensure_mask(set)?;
                 self.toast = Some(("Erasing a fill layer paints its mask, so the Mask tool can bring it back.".into(), now));
-                Some((true, brush::Paint { colour: [0.0; 3], ..base }))
+                Some((true, brush::Paint { colour: [0.0; 3], texture: None, ..base }))
             }
             Tool::Mask => {
                 ensure_mask(set)?;
@@ -1842,6 +1991,8 @@ impl UmberApp {
         let c = texset::read_texel(device, queue, color, x, y, 4);
         let m = texset::read_texel(device, queue, mat, x, y, 8);
         self.primary = Color32::from_rgb(c[0], c[1], c[2]);
+        // Picking up a colour means painting with it.
+        self.brush.use_texture = false;
         self.brush.rough = texset::f16_to_f32(m[0], m[1]);
         self.brush.metal = texset::f16_to_f32(m[2], m[3]);
         self.brush.height = texset::f16_to_f32(m[4], m[5]);
@@ -1871,6 +2022,10 @@ impl UmberApp {
                     p.circle(back, 11.0, self.secondary, Stroke::new(2.0, PANEL));
                     let front = puck.min + Vec2::splat(17.0);
                     p.circle(front, 13.0, self.primary, Stroke::new(2.0, PANEL));
+                    if let (true, Some((_, thumb, _))) = (self.brush.use_texture, &self.brush_texture) {
+                        let r = Rect::from_center_size(front, Vec2::splat(26.0));
+                        egui::Image::new((thumb.id(), r.size())).corner_radius(13).paint_at(ui, r);
+                    }
                     p.circle_stroke(front, 14.5, Stroke::new(1.0, Color32::from_rgb(0x54, 0x4a, 0x3f)));
                     if resp.on_hover_text("Colour").clicked() {
                         self.colour_open = !self.colour_open;
@@ -1885,27 +2040,43 @@ impl UmberApp {
         if self.colour_open {
             // Beside the rail, just under the brush bar (which can be two rows tall).
             let pos = egui::pos2(resp.response.rect.right() + 8.0, vp.top() + 120.0);
-            egui::Area::new(egui::Id::unique("colour_popover")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+            let popover = egui::Area::new(egui::Id::unique("colour_popover")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
                 theme::panel_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
                     let w = 220.0;
                     ui.set_width(w);
                     // The picker sizes itself from the slider width.
                     ui.spacing_mut().slider_width = w;
                     ui.horizontal(|ui| {
-                        widgets::caps_label(ui, "Colour");
+                        widgets::caps_label(ui, "Brush paints");
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if widgets::icon_button(ui, icons::X, false, 28.0, "Close").clicked() {
                                 self.colour_open = false;
                             }
                         });
                     });
-                    egui::color_picker::color_picker_color32(ui, &mut self.primary, egui::color_picker::Alpha::Opaque);
+                    let mut textured = self.brush.use_texture;
+                    if widgets::segmented_fill(ui, &mut textured, &[(false, "Colour"), (true, "Texture")], 30.0) {
+                        self.brush.use_texture = textured;
+                        self.sync_brush_texture();
+                    }
+                    ui.add_space(8.0);
+                    if self.brush.use_texture {
+                        self.texture_picker(ui, w);
+                    } else {
+                        widgets::colour_picker(ui, &mut self.primary, w);
+                    }
                     ui.add_space(6.0);
+                    let height_tip = if self.brush.use_texture {
+                        "How deep the texture's bumps go; 0.50 is flat. Turn on Height in the brush bar to paint it"
+                    } else {
+                        "Turn on Height in the brush bar to paint it"
+                    };
+
                     let b = &mut self.brush;
                     for (on, label, value, tip) in [
                         (b.paint_rough, "Roughness", &mut b.rough, "Turn on Rough in the brush bar to paint it"),
                         (b.paint_metal, "Metalness", &mut b.metal, "Turn on Metal in the brush bar to paint it"),
-                        (b.paint_height, "Height", &mut b.height, "Turn on Height in the brush bar to paint it"),
+                        (b.paint_height, "Height", &mut b.height, height_tip),
                     ] {
                         ui.add_enabled_ui(on, |ui| {
                             let r = labelled_slider(ui, label, value, 0.0..=1.0, w, |v| format!("{v:.2}"));
@@ -1914,7 +2085,88 @@ impl UmberApp {
                     }
                 });
             });
+            // A press anywhere else closes it (the rail is left alone, so the colour circles
+            // still toggle it). The viewport doesn't paint with that press.
+            let press = ctx.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());
+            if press.is_some_and(|p| !popover.response.rect.contains(p) && !resp.response.rect.contains(p)) {
+                self.colour_open = false;
+            }
         }
+    }
+
+    /// The Texture side of the colour popover: what to paint with, and how it lies on.
+    fn texture_picker(&mut self, ui: &mut egui::Ui, w: f32) {
+        let materials: Vec<mesh::Material> = self.mesh.as_ref().map(|m| m.materials.clone()).unwrap_or_default();
+        let cols = 4;
+        let gap = 6.0;
+        let side = ((w - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+        let mut choices: Vec<Option<Source>> = self.texture_choices().into_iter().map(Some).collect();
+        // The last tile opens an image file.
+        choices.push(None);
+        let mut chosen = None;
+        let mut open = false;
+        for row in choices.chunks(cols) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for choice in row {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
+                    let p = ui.painter_at(rect.expand(2.0));
+                    match choice {
+                        Some(src) => {
+                            match self.texture_thumb(src) {
+                                Some(t) => {
+                                    egui::Image::new((t.id(), rect.size())).corner_radius(8).paint_at(ui, rect);
+                                }
+                                None => {
+                                    p.rect_filled(rect, CornerRadius::same(8), RAISED);
+                                }
+                            }
+                            let on = self.brush.texture.as_ref() == Some(src);
+                            if on {
+                                p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+                            } else if resp.hovered() {
+                                p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, TEXT_3), egui::StrokeKind::Inside);
+                            }
+                            if widgets::tapped(&resp.on_hover_text(src.name(&materials))) {
+                                chosen = Some(src.clone());
+                            }
+                        }
+                        None => {
+                            let fill = if resp.hovered() { RAISED } else { SEG_BG };
+                            p.rect_filled(rect, CornerRadius::same(8), fill);
+                            p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, PANEL_LINE), egui::StrokeKind::Inside);
+                            p.text(rect.center(), Align2::CENTER_CENTER, icons::IMAGE_PLUS, theme::icon_font(20.0), ICON);
+                            let tip = format!("{}\n{}", commands::get(Cmd::OpenBrushTexture).name, commands::get(Cmd::OpenBrushTexture).about);
+                            if resp.on_hover_text(tip).clicked() {
+                                open = true;
+                            }
+                        }
+                    }
+                }
+            });
+            ui.add_space(gap - ui.spacing().item_spacing.y);
+        }
+        if let Some(src) = chosen {
+            self.choose_texture(src);
+        }
+        if open {
+            self.open_brush_texture();
+        }
+        if let Some(src) = &self.brush.texture {
+            ui.label(egui::RichText::new(src.name(&materials)).color(TEXT_2));
+        }
+        ui.add_space(8.0);
+
+        widgets::caps_label(ui, "Lay it on");
+        let options: Vec<(Projection, &str)> = Projection::ALL.iter().map(|p| (*p, p.name())).collect();
+        widgets::segmented_fill(ui, &mut self.brush.projection, &options, 28.0);
+        ui.add(egui::Label::new(egui::RichText::new(self.brush.projection.about()).color(TEXT_3).size(12.0)).wrap());
+        ui.add_space(6.0);
+        // Scale moves in doublings, so small and large are equally easy to reach.
+        let mut doublings = self.brush.texture_scale.max(1e-3).log2();
+        labelled_slider(ui, "Scale", &mut doublings, -3.0..=3.0, w, |v| format!("×{:.2}", v.exp2()));
+        self.brush.texture_scale = doublings.exp2();
+        labelled_slider(ui, "Turn", &mut self.brush.texture_turn, -180.0..=180.0, w, |v| format!("{v:.0}°"));
     }
 
     fn brush_bar(&mut self, ctx: &egui::Context, vp: Rect) {
@@ -2237,7 +2489,7 @@ impl UmberApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Colour").color(TEXT_2));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        egui::color_picker::color_edit_button_srgba(ui, &mut f.colour, egui::color_picker::Alpha::Opaque);
+                        widgets::colour_button(ui, &mut f.colour);
                     });
                 });
                 ui.add_space(4.0);

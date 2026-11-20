@@ -21,6 +21,9 @@ struct Stroke {
     channels: vec4<f32>,
     // Hardness, fill opacity, unused, unused.
     shape: vec4<f32>,
+    // Brush texture: projection (0 none, 1 surface, 2 UV, 3 view), repeats per unit, then the
+    // cosine and sine of its rotation.
+    tex: vec4<f32>,
 };
 
 struct Dab {
@@ -43,6 +46,9 @@ const TILE: u32 = 256u;
 @group(0) @binding(5) var base_mat: texture_2d<f32>;
 @group(0) @binding(6) var base_cov: texture_2d<f32>;
 @group(0) @binding(7) var<storage, read_write> tiles: array<atomic<u32>>;
+@group(0) @binding(8) var brush_colour: texture_2d<f32>;
+@group(0) @binding(9) var brush_height: texture_2d<f32>;
+@group(0) @binding(10) var brush_sampler: sampler;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -54,6 +60,7 @@ struct UvOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
 };
 
 @vertex
@@ -62,7 +69,77 @@ fn vs_uv(v: VsIn) -> UvOut {
     o.clip = vec4<f32>(v.uv.x * 2.0 - 1.0, 1.0 - v.uv.y * 2.0, 0.0, 1.0);
     o.world = v.pos;
     o.normal = v.normal;
+    o.uv = v.uv;
     return o;
+}
+
+// ---------------------------------------------------------------- brush texture
+
+/// What the brush lays down at a texel: colour with alpha (how much of it lands), and height.
+struct Ink {
+    colour: vec4<f32>,
+    height: f32,
+};
+
+fn turn(c: vec2<f32>) -> vec2<f32> {
+    let cs = s.tex.zw;
+    return vec2<f32>(c.x * cs.x - c.y * cs.y, c.x * cs.y + c.y * cs.x);
+}
+
+/// One look-up, with the footprint given so the right mip level is used.
+fn ink_at(c: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> Ink {
+    var k: Ink;
+    k.colour = textureSampleGrad(brush_colour, brush_sampler, turn(c), turn(dx), turn(dy));
+    k.height = textureSampleGrad(brush_height, brush_sampler, turn(c), turn(dx), turn(dy)).r;
+    return k;
+}
+
+/// The brush's colour and height at this texel: flat paint, or a look-up in its texture.
+/// Must run before anything branches per texel, since it takes screen derivatives.
+fn ink(i: UvOut) -> Ink {
+    let mode = u32(s.tex.x);
+    let rep = s.tex.y;
+    // The same three projections are worked out whichever is used: derivatives need every
+    // texel to take the same path.
+    let p = i.world * rep;
+    let dpx = dpdx(p);
+    let dpy = dpdy(p);
+    let u = i.uv * rep;
+    let dux = dpdx(u);
+    let duy = dpdy(u);
+    let cp = s.view_proj * vec4<f32>(i.world, 1.0);
+    let ndc = cp.xy / select(cp.w, 1.0, abs(cp.w) < 1e-6);
+    let v = vec2<f32>((ndc.x * 0.5 + 0.5) * s.viewport.x, (0.5 - ndc.y * 0.5) * s.viewport.y) * rep;
+    let dvx = dpdx(v);
+    let dvy = dpdy(v);
+
+    var k: Ink;
+    k.colour = vec4<f32>(s.colour.rgb, 1.0);
+    k.height = 1.0;
+    if (mode == 1u) {
+        // Three projections blended by which way the surface faces. Up stays up on walls.
+        var w = pow(abs(normalize(i.normal)), vec3<f32>(4.0));
+        w = w / max(w.x + w.y + w.z, 1e-5);
+        let a = ink_at(vec2<f32>(p.z, -p.y), vec2<f32>(dpx.z, -dpx.y), vec2<f32>(dpy.z, -dpy.y));
+        let b = ink_at(p.xz, dpx.xz, dpy.xz);
+        let c = ink_at(vec2<f32>(p.x, -p.y), vec2<f32>(dpx.x, -dpx.y), vec2<f32>(dpy.x, -dpy.y));
+        k.colour = a.colour * w.x + b.colour * w.y + c.colour * w.z;
+        k.height = a.height * w.x + b.height * w.y + c.height * w.z;
+    } else if (mode == 2u) {
+        k = ink_at(u, dux, duy);
+    } else if (mode == 3u) {
+        k = ink_at(v, dvx, dvy);
+    }
+    return k;
+}
+
+/// The height the brush paints: the slider alone, or with a texture, the texture's bumps
+/// scaled by how far the slider is from flat (0.5).
+fn ink_height(k: Ink) -> f32 {
+    if (u32(s.tex.x) == 0u) {
+        return s.material.z;
+    }
+    return clamp(0.5 + (k.height - 0.5) * (s.material.z - 0.5) * 2.0, 0.0, 1.0);
 }
 
 /// Can the camera see `world`? Compares its distance from the eye with the nearest surface
@@ -154,6 +231,7 @@ struct LayerOut {
 /// Paint layers: colour with its coverage in alpha, material values, material coverage.
 @fragment
 fn fs_layer(i: UvOut) -> LayerOut {
+    let k = ink(i);
     let texel = vec2<i32>(floor(i.clip.xy));
     let m = stroke_value(i, texel);
     if (m < 0.0) {
@@ -165,20 +243,23 @@ fn fs_layer(i: UvOut) -> LayerOut {
     let bc = textureLoad(base_color, texel, 0);
     let bm = textureLoad(base_mat, texel, 0);
     let bv = textureLoad(base_cov, texel, 0);
-    let a = clamp(m * s.channels, vec4<f32>(0.0), vec4<f32>(1.0));
     var o: LayerOut;
     if (u32(s.viewport.w) == MODE_ERASE) {
+        let a = clamp(m * s.channels, vec4<f32>(0.0), vec4<f32>(1.0));
         o.color = vec4<f32>(bc.rgb, bc.a * (1.0 - a.x));
         o.mat = bm;
         o.cov = vec4<f32>(bv.xyz * (vec3<f32>(1.0) - a.yzw), 0.0);
         return o;
     }
+    // Where the texture is see-through, the brush lays nothing down.
+    let a = clamp(m * k.colour.a * s.channels, vec4<f32>(0.0), vec4<f32>(1.0));
+    let material = vec3<f32>(s.material.xy, ink_height(k));
     // Lay the paint over what was there: coverage adds, values mix by coverage.
     let ca = a.x + bc.a * (1.0 - a.x);
-    let rgb = (s.colour.rgb * a.x + bc.rgb * bc.a * (1.0 - a.x)) / max(ca, 1e-5);
+    let rgb = (k.colour.rgb * a.x + bc.rgb * bc.a * (1.0 - a.x)) / max(ca, 1e-5);
     o.color = vec4<f32>(select(bc.rgb, rgb, ca > 0.0), ca);
     let cv = a.yzw + bv.xyz * (vec3<f32>(1.0) - a.yzw);
-    let mv = (s.material.xyz * a.yzw + bm.xyz * bv.xyz * (vec3<f32>(1.0) - a.yzw)) / max(cv, vec3<f32>(1e-5));
+    let mv = (material * a.yzw + bm.xyz * bv.xyz * (vec3<f32>(1.0) - a.yzw)) / max(cv, vec3<f32>(1e-5));
     o.mat = vec4<f32>(select(bm.xyz, mv, cv > vec3<f32>(0.0)), bm.w);
     o.cov = vec4<f32>(cv, 0.0);
     return o;
@@ -187,6 +268,7 @@ fn fs_layer(i: UvOut) -> LayerOut {
 /// Layer masks: greyscale in red, painted towards the brush's grey value.
 @fragment
 fn fs_mask(i: UvOut) -> @location(0) vec4<f32> {
+    let k = ink(i);
     let texel = vec2<i32>(floor(i.clip.xy));
     let m = stroke_value(i, texel);
     if (m < 0.0) {
@@ -195,7 +277,9 @@ fn fs_mask(i: UvOut) -> @location(0) vec4<f32> {
     textureStore(stroke, texel, vec4<f32>(m, 0.0, 0.0, 0.0));
     mark_tile(texel);
     let b = textureLoad(base_color, texel, 0).r;
-    var v = mix(b, s.colour.r, m);
+    // With a texture, its brightness is the grey, and see-through parts leave the mask alone.
+    let grey = select(s.colour.r, dot(k.colour.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), u32(s.tex.x) != 0u);
+    var v = mix(b, grey, m * k.colour.a);
     if (u32(s.viewport.w) == MODE_ERASE) {
         // Erasing a mask brings the layer back.
         v = mix(b, 1.0, m);

@@ -2,6 +2,7 @@
 
 mod app;
 mod brush;
+mod brush_texture;
 mod camera;
 mod commands;
 mod export;

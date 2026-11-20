@@ -32,6 +32,8 @@ mkdir -p "$OUT"
 # A fresh preferences folder unless one is given, so first-run tips show as they would for
 # someone new, and the captures never touch the real one.
 export UMBER_CONFIG_DIR=${UMBER_CONFIG_DIR:-$(mktemp -d)}
+# Likewise recovery copies, so a capture never leaves "unsaved work" on the real welcome card.
+export UMBER_RECOVERY_DIR=${UMBER_RECOVERY_DIR:-$(mktemp -d)}
 
 WGPU_BACKEND=vulkan ./target/debug/umber "$@" > "$OUT/umber.log" 2>&1 &
 APP=$!

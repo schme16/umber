@@ -83,6 +83,8 @@ fn segmented_to<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, 
         if resp.clicked() && !on {
             *value = *opt;
             changed = true;
+            // This frame already drew the old choice; draw the new one without waiting for input.
+            ui.ctx().request_repaint();
         }
         x += w + 2.0;
     }
@@ -213,5 +215,139 @@ pub fn pressure_curve(ui: &mut Ui, size: egui::Vec2, curve: &crate::pen::Pressur
 /// again, so toggles (like swapping colours) don't undo themselves; keyboard activation does.
 pub fn tapped(response: &Response) -> bool {
     let pressed = response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed());
-    pressed || (response.clicked() && !response.ctx.input(|i| i.pointer.any_released()))
+    let tapped = pressed || (response.clicked() && !response.ctx.input(|i| i.pointer.any_released()));
+    if tapped {
+        // What was tapped changes after this frame drew it, so draw another.
+        response.ctx.request_repaint();
+    }
+    tapped
+}
+
+/// Umber's colour picker: a saturation/brightness square, a hue bar and a hex field. Every
+/// part has a fixed size and the handles stay inside the space they're given, so the panel
+/// never changes size as the colour changes. Returns true when the colour changed.
+pub fn colour_picker(ui: &mut Ui, colour: &mut Color32, width: f32) -> bool {
+    use egui::ecolor::HsvaGamma;
+    let id = egui::Id::unique("umber colour picker");
+    // Hue and saturation are remembered across frames: black or grey alone would lose them.
+    let remembered = ui.data(|d| d.get_temp::<(Color32, [f32; 3])>(id));
+    let mut hsv = match remembered {
+        Some((c, hsv)) if c == *colour => hsv,
+        _ => {
+            let h = HsvaGamma::from(*colour);
+            [h.h, h.s, h.v]
+        }
+    };
+    let before = hsv;
+    let to_colour = |h: f32, s: f32, v: f32| Color32::from(HsvaGamma { h, s, v, a: 1.0 });
+    let handle = 8.0;
+
+    // Saturation across, brightness up. Room for the handle above and below.
+    let square_h = (width * 0.62).round();
+    let (outer, resp) = ui.allocate_exact_size(egui::vec2(width, square_h + handle * 2.0), Sense::click_and_drag());
+    let square = outer.shrink2(egui::vec2(0.0, handle));
+    if let Some(p) = resp.interact_pointer_pos() {
+        hsv[1] = ((p.x - square.left()) / square.width()).clamp(0.0, 1.0);
+        hsv[2] = ((square.bottom() - p.y) / square.height()).clamp(0.0, 1.0);
+    }
+    let n = 16;
+    let mut mesh = egui::Mesh::default();
+    for j in 0..=n {
+        for i in 0..=n {
+            let (s, v) = (i as f32 / n as f32, 1.0 - j as f32 / n as f32);
+            let pos = egui::pos2(square.left() + square.width() * s, square.top() + square.height() * (1.0 - v));
+            mesh.colored_vertex(pos, to_colour(hsv[0], s, v));
+        }
+    }
+    for j in 0..n {
+        for i in 0..n {
+            let a = j * (n + 1) + i;
+            mesh.add_triangle(a, a + 1, a + n + 2);
+            mesh.add_triangle(a, a + n + 2, a + n + 1);
+        }
+    }
+    let p = ui.painter();
+    p.add(mesh);
+    p.rect_stroke(square, CornerRadius::ZERO, Stroke::new(1.0, PANEL_LINE), egui::StrokeKind::Outside);
+    let at = egui::pos2(square.left() + square.width() * hsv[1], square.bottom() - square.height() * hsv[2]);
+    let picked = to_colour(hsv[0], hsv[1], hsv[2]);
+    p.circle(at, handle - 1.5, picked, Stroke::new(2.0, Color32::WHITE));
+    p.circle_stroke(at, handle, Stroke::new(1.0, Color32::from_black_alpha(160)));
+
+    ui.add_space(4.0);
+    let bar_h = 16.0;
+    let (outer, resp) = ui.allocate_exact_size(egui::vec2(width, bar_h + 6.0), Sense::click_and_drag());
+    let bar = outer.shrink2(egui::vec2(0.0, 3.0));
+    if let Some(p) = resp.interact_pointer_pos() {
+        hsv[0] = ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+    }
+    let mut mesh = egui::Mesh::default();
+    let steps = 36;
+    for i in 0..=steps {
+        let h = i as f32 / steps as f32;
+        let x = bar.left() + bar.width() * h;
+        let c = to_colour(h, 1.0, 1.0);
+        mesh.colored_vertex(egui::pos2(x, bar.top()), c);
+        mesh.colored_vertex(egui::pos2(x, bar.bottom()), c);
+        if i > 0 {
+            let a = (i * 2) as u32;
+            mesh.add_triangle(a - 2, a - 1, a + 1);
+            mesh.add_triangle(a - 2, a + 1, a);
+        }
+    }
+    let p = ui.painter();
+    p.add(mesh);
+    let x = bar.left() + bar.width() * hsv[0];
+    let marker = egui::Rect::from_center_size(egui::pos2(x, bar.center().y), egui::vec2(6.0, bar_h + 6.0));
+    p.rect(marker, CornerRadius::same(3), to_colour(hsv[0], 1.0, 1.0), Stroke::new(2.0, Color32::WHITE), egui::StrokeKind::Inside);
+
+    // The colour and its hex value, both fixed width.
+    ui.add_space(6.0);
+    let mut changed = hsv != before;
+    if changed {
+        *colour = to_colour(hsv[0], hsv[1], hsv[2]);
+    }
+    ui.horizontal(|ui| {
+        let (swatch, _) = ui.allocate_exact_size(egui::vec2(32.0, 28.0), Sense::hover());
+        ui.painter().rect(swatch, CornerRadius::same(6), *colour, Stroke::new(1.0, PANEL_LINE), egui::StrokeKind::Inside);
+        let hex_id = id.with("hex");
+        let mut text = ui.data(|d| d.get_temp::<String>(hex_id)).unwrap_or_default();
+        let shown = format!("#{:02X}{:02X}{:02X}", colour.r(), colour.g(), colour.b());
+        if !ui.memory(|m| m.has_focus(hex_id)) {
+            text = shown;
+        }
+        let edit = egui::TextEdit::singleline(&mut text).id(hex_id).font(theme::mono(13.0)).desired_width(width - 32.0 - 8.0).char_limit(7);
+        let r = ui.add(edit);
+        if r.changed() {
+            let hex = text.trim_start_matches('#');
+            if let (6, Ok(v)) = (hex.len(), u32::from_str_radix(hex, 16)) {
+                *colour = Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
+                let h = HsvaGamma::from(*colour);
+                hsv = [h.h, h.s, h.v];
+                changed = true;
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(hex_id, text));
+    });
+    ui.data_mut(|d| d.insert_temp(id, (*colour, hsv)));
+    if changed {
+        ui.ctx().request_repaint();
+    }
+    changed
+}
+
+/// A colour swatch that opens [`colour_picker`] beside it. Returns true when the colour changed.
+pub fn colour_button(ui: &mut Ui, colour: &mut Color32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(48.0, 30.0), Sense::click());
+    let line = if resp.hovered() { TEXT_3 } else { PANEL_LINE };
+    ui.painter().rect(rect, CornerRadius::same(8), *colour, Stroke::new(1.0, line), egui::StrokeKind::Inside);
+    let mut changed = false;
+    egui::Popup::from_toggle_button_response(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .frame(theme::panel_frame().inner_margin(egui::Margin::same(12)))
+        .show(|ui| {
+            ui.set_width(220.0);
+            changed = colour_picker(ui, colour, 220.0);
+        });
+    changed
 }
