@@ -11,7 +11,7 @@ use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Order, Pos2, Re
 
 use crate::brush::{self, BrushEngine, Dab};
 use crate::brush_texture::{self, Projection, Source};
-use crate::camera::OrbitCamera;
+use crate::camera::{CameraPrefs, OrbitCamera, Pivot, Turning};
 use crate::commands::{self, Cmd};
 use crate::export;
 use crate::help::{self, Tip};
@@ -283,11 +283,51 @@ enum LayerAction {
     Delete,
 }
 
+/// How far back a release looks to see whether the drag was a flick, in seconds.
+const FLICK_WINDOW: f64 = 0.08;
+/// How quickly a flicked model slows down: its speed falls by e every 1/SPIN_DECAY seconds.
+const SPIN_DECAY: f32 = 6.5;
+
+/// A camera drag in progress, and the spin a flick leaves after it.
+#[derive(Default)]
+struct Nav {
+    dragging: bool,
+    /// What the model turns about, chosen as the drag starts.
+    pivot: Vec3,
+    /// How deep the grabbed point is, so a pan keeps it under the cursor.
+    depth: f32,
+    /// Recent turning moves as (time, points), to tell a flick from a stop.
+    recent: Vec<(f64, Vec2)>,
+    /// Points per second the model keeps turning after a flick.
+    spin: Vec2,
+    /// Where the scroll wheel last zoomed: the cursor, and the point under it.
+    zoom_at: Option<(Pos2, Vec3)>,
+}
+
+/// The speed a drag let go at, in points per second, if it was still moving fast: a drag that
+/// stopped before letting go doesn't spin.
+fn flick(recent: &[(f64, Vec2)], now: f64) -> Vec2 {
+    let window = 0.05;
+    let moves: Vec<_> = recent.iter().filter(|(t, d)| now - t < window && *d != Vec2::ZERO).collect();
+    if moves.len() < 2 {
+        return Vec2::ZERO;
+    }
+    let span = (now - moves[0].0).max(1.0 / 120.0) as f32;
+    let v = moves.iter().fold(Vec2::ZERO, |a, (_, d)| a + *d) / span;
+    let speed = v.length();
+    if speed > 300.0 { v * (speed.min(4000.0) / speed) } else { Vec2::ZERO }
+}
+
 pub struct UmberApp {
     ctx: egui::Context,
     rs: egui_wgpu::RenderState,
     renderer: ViewportRenderer,
     camera: OrbitCamera,
+    /// How dragging and scrolling move the camera, remembered between sessions.
+    cam_prefs: CameraPrefs,
+    /// A turn or pan in progress, or the spin a flick left behind.
+    nav: Nav,
+    camera_open: bool,
     mesh: Option<Mesh>,
     toast: Option<(String, f64)>,
     /// Seconds since start, as of this frame.
@@ -399,6 +439,9 @@ impl UmberApp {
             rs,
             renderer,
             camera: OrbitCamera::default(),
+            cam_prefs: tips.camera(),
+            nav: Nav::default(),
+            camera_open: false,
             mesh: None,
             toast: None,
             now: 0.0,
@@ -492,6 +535,7 @@ impl UmberApp {
         let (center, radius) = mesh.bounding_sphere();
         self.camera = OrbitCamera::default();
         self.camera.frame(center, radius);
+        self.nav = Nav::default();
         if !mesh.has_uvs {
             self.view_mode = ViewMode::UvCheck;
         }
@@ -813,17 +857,18 @@ impl UmberApp {
 
     /// Open a model or a project, asking about unsaved changes first.
     fn open_path(&mut self, path: &Path) {
+        self.tips.remember_folder(path);
         self.replace_work(Pending::Open(path.to_owned()));
     }
 
     fn open_dialog(&mut self) {
         let mut extensions = vec![project::EXTENSION];
         extensions.extend_from_slice(mesh::SUPPORTED_EXTENSIONS);
-        let picked = self.dialog()
-            .set_title("Open a model or project")
-            .add_filter("Models and Umber projects", &extensions)
-            .pick_file();
-        if let Some(path) = picked {
+        let mut dialog = self.dialog().set_title("Open a model or project").add_filter("Models and Umber projects", &extensions);
+        if let Some(dir) = self.start_folder() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
             self.open_path(&path);
         }
     }
@@ -910,8 +955,11 @@ impl UmberApp {
         if let Some(c) = s.camera {
             self.camera.target = Vec3::from(c.target);
             self.camera.distance = c.distance;
-            self.camera.yaw = c.yaw;
-            self.camera.pitch = c.pitch;
+            self.camera.rot = match c.rot {
+                Some(q) => glam::Quat::from_array(q).normalize(),
+                None => OrbitCamera::level(c.yaw, c.pitch),
+            };
+            self.nav = Nav::default();
         }
         if let Ok(mut brush) = serde_json::from_value::<BrushSettings>(s.brush) {
             brush.curve = self.brush.curve;
@@ -943,7 +991,10 @@ impl UmberApp {
     fn settings(&self) -> project::Settings {
         let c = &self.camera;
         project::Settings {
-            camera: Some(project::CameraInfo { target: c.target.into(), distance: c.distance, yaw: c.yaw, pitch: c.pitch }),
+            camera: Some({
+                let (yaw, pitch) = c.yaw_pitch();
+                project::CameraInfo { target: c.target.into(), distance: c.distance, yaw, pitch, rot: Some(c.rot.to_array()) }
+            }),
             brush: serde_json::to_value(&self.brush).unwrap_or_default(),
             primary: Some(self.primary.to_array()),
             secondary: Some(self.secondary.to_array()),
@@ -1003,12 +1054,22 @@ impl UmberApp {
         let path = match (&self.project_path, choose) {
             (Some(p), false) => p.clone(),
             _ => match self.pick_save_path() {
-                Some(p) => p,
+                Some(p) => {
+                    self.tips.remember_folder(&p);
+                    p
+                }
                 None => return false,
             },
         };
         self.start_save(path, false);
         true
+    }
+
+    /// Where Open and Save as start: the folder last opened from or saved to, else the open
+    /// work's own folder.
+    fn start_folder(&self) -> Option<PathBuf> {
+        let own = self.project_path.as_ref().or(self.model_path.as_ref()).and_then(|p| p.parent());
+        self.tips.last_folder().or(own).map(Path::to_owned)
     }
 
     fn pick_save_path(&self) -> Option<PathBuf> {
@@ -1020,7 +1081,7 @@ impl UmberApp {
             Some(p) => project::display_name(p),
             None => format!("{}.{}", self.work_name(), project::EXTENSION),
         };
-        let dir = self.project_path.as_ref().or(self.model_path.as_ref()).and_then(|p| p.parent());
+        let dir = self.start_folder();
         let mut dialog = self.dialog().set_title("Save project").add_filter("Umber project", &[project::EXTENSION]).set_file_name(name);
         if let Some(dir) = dir {
             dialog = dialog.set_directory(dir);
@@ -1293,6 +1354,10 @@ impl UmberApp {
             Cmd::ReachAll => b.stroke_reach == Reach::All,
             Cmd::ReachFace => b.stroke_reach == Reach::Face,
             Cmd::Stats => self.stats.open,
+            Cmd::TurnAbout(p) => self.cam_prefs.pivot == p,
+            Cmd::Turning(t) => self.cam_prefs.turning == t,
+            Cmd::ZoomToCursor => self.cam_prefs.zoom_to_cursor,
+            Cmd::SpinOnFlick => self.cam_prefs.momentum,
             _ => return None,
         })
     }
@@ -1354,8 +1419,14 @@ impl UmberApp {
                 if let Some(m) = &self.mesh {
                     let (c, r) = m.bounding_sphere();
                     self.camera.frame(c, r);
+                    self.nav = Nav::default();
                 }
             }
+            Cmd::CameraSettings => self.camera_open = true,
+            Cmd::TurnAbout(p) => self.set_cam_prefs(CameraPrefs { pivot: p, ..self.cam_prefs }),
+            Cmd::Turning(t) => self.set_cam_prefs(CameraPrefs { turning: t, ..self.cam_prefs }),
+            Cmd::ZoomToCursor => self.set_cam_prefs(CameraPrefs { zoom_to_cursor: !self.cam_prefs.zoom_to_cursor, ..self.cam_prefs }),
+            Cmd::SpinOnFlick => self.set_cam_prefs(CameraPrefs { momentum: !self.cam_prefs.momentum, ..self.cam_prefs }),
             Cmd::View(v) => {
                 self.view_mode = v;
                 // The UV workspace always shows the checker, so go where the view applies.
@@ -1533,8 +1604,25 @@ impl UmberApp {
                 (None, Some(p)) => format!("Save to {} ({key})", home_relative(p)),
                 (None, None) => format!("Save as a project, layers and all ({key})"),
             };
+            let more = save_menu_arrow(ui, self.mesh.is_some());
+            let mut chosen = None;
+            egui::Popup::menu(&more).show(|ui| {
+                if menu_item(ui, "Save", &commands::key_label(Cmd::Save).unwrap_or_default()).clicked() {
+                    chosen = Some(Cmd::Save);
+                }
+                let save_as = format!("To a new file · {}", commands::key_label(Cmd::SaveAs).unwrap_or_default());
+                if menu_item(ui, "Save as…", &save_as).clicked() {
+                    chosen = Some(Cmd::SaveAs);
+                }
+            });
+            // The arrow sits against Save, as one split button.
+            let gap = std::mem::replace(&mut ui.spacing_mut().item_spacing.x, 0.0);
             if widgets::icon_action(ui, icons::SAVE, self.mesh.is_some(), 36.0, &save_tip).clicked() {
-                self.save(false);
+                chosen = Some(Cmd::Save);
+            }
+            ui.spacing_mut().item_spacing.x = gap;
+            if let Some(cmd) = chosen {
+                self.run(cmd);
             }
             if widgets::icon_button(ui, icons::FOLDER_OPEN, false, 36.0, &format!("Open a model or project ({})", commands::key_label(Cmd::Open).unwrap_or_default())).clicked() {
                 self.open_dialog();
@@ -1554,9 +1642,9 @@ impl UmberApp {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
 
-        // Navigation: right, middle or a pen's extra button drag orbits, Shift pans. For pen-only
-        // use, holding Alt or Space turns a left drag into one too (Huion's driver can send
-        // Space from a pen button).
+        // Navigation: right, middle or a pen's extra button drag turns the model, Shift pans. For
+        // pen-only use, holding Alt or Space turns a left drag into one too (Huion's driver can
+        // send Space from a pen button).
         let (shift, alt, space) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt, self.space_held));
         let hand = alt || space;
         let delta = response.drag_delta();
@@ -1565,17 +1653,49 @@ impl UmberApp {
             || response.dragged_by(egui::PointerButton::Extra1)
             || response.dragged_by(egui::PointerButton::Extra2)
             || (hand && self.stroke.is_none() && response.dragged_by(egui::PointerButton::Primary));
+        let (now, dt, hover, pressed_any) =
+            ui.input(|i| (i.time, i.stable_dt.min(0.05), i.pointer.hover_pos(), i.pointer.any_pressed()));
+        if pressed_any && response.hovered() {
+            // Touching the view again catches a spinning model.
+            self.nav.spin = Vec2::ZERO;
+        }
         if nav_drag {
-            if shift {
-                self.camera.pan(delta.x, delta.y, rect.height());
-            } else {
-                self.camera.orbit(delta.x, delta.y);
+            if !self.nav.dragging {
+                let origin = ui.input(|i| i.pointer.press_origin()).or(hover);
+                self.start_nav(origin, rect);
             }
+            if delta != Vec2::ZERO {
+                if shift {
+                    self.camera.pan(delta.x, delta.y, rect.height(), self.nav.depth);
+                } else {
+                    self.camera.turn(delta.x, delta.y, self.nav.pivot, self.cam_prefs.turning);
+                }
+                self.nav.zoom_at = None;
+            }
+            self.nav.recent.push((now, if shift { Vec2::ZERO } else { delta }));
+            self.nav.recent.retain(|(t, _)| now - t < FLICK_WINDOW);
+        } else if self.nav.dragging {
+            self.nav.dragging = false;
+            if self.cam_prefs.momentum {
+                self.nav.spin = flick(&self.nav.recent, now);
+            }
+            self.nav.recent.clear();
+        }
+        if !self.nav.dragging && self.nav.spin != Vec2::ZERO {
+            let step = self.nav.spin * dt;
+            self.camera.turn(step.x, step.y, self.nav.pivot, self.cam_prefs.turning);
+            self.nav.spin *= (-dt * SPIN_DECAY).exp();
+            if self.nav.spin.length() < 12.0 {
+                self.nav.spin = Vec2::ZERO;
+            }
+            self.nav.zoom_at = None;
+            ui.ctx().request_repaint();
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                self.camera.zoom(scroll / 50.0);
+                let towards = if self.cam_prefs.zoom_to_cursor { hover.map(|p| self.zoom_anchor(p, rect)) } else { None };
+                self.camera.zoom(scroll / 50.0, towards);
             }
         }
 
@@ -1651,10 +1771,69 @@ impl UmberApp {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
 
+        // While turning, a small brass dot marks what the model turns about.
+        if self.nav.dragging && !shift && self.mesh.is_some() {
+            let clip = proj * view * self.nav.pivot.extend(1.0);
+            if clip.w > 0.0 {
+                let ndc = clip.truncate() / clip.w;
+                let at = egui::pos2(rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(), rect.top() + (1.0 - ndc.y) * 0.5 * rect.height());
+                let p = ui.painter();
+                p.circle_filled(at, 5.0, Color32::from_black_alpha(140));
+                p.circle_filled(at, 3.5, ACCENT);
+            }
+        }
+
         if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
             ui.painter().rect_stroke(rect.shrink(8.0), CornerRadius::same(16), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
         }
         rect
+    }
+
+    /// Change how the camera moves, and remember it. Going back to turntable turning stands
+    /// a tipped model upright again.
+    fn set_cam_prefs(&mut self, prefs: CameraPrefs) {
+        if prefs.turning == Turning::Turntable && self.cam_prefs.turning == Turning::Free {
+            self.camera.make_level();
+        }
+        if !prefs.momentum {
+            self.nav.spin = Vec2::ZERO;
+        }
+        self.cam_prefs = prefs;
+        self.tips.set_camera(prefs);
+    }
+
+    /// A turn or pan begins at `at`: choose what it turns about and how deep the grabbed point is.
+    fn start_nav(&mut self, at: Option<Pos2>, rect: Rect) {
+        let centre = self.mesh.as_ref().map_or(self.camera.target, |m| m.bounding_sphere().0);
+        let grabbed = at.and_then(|p| {
+            let (origin, dir) = self.ray(p, rect);
+            self.mesh.as_ref()?.raycast(origin, dir).map(|h| origin + dir * h.t)
+        });
+        self.nav.pivot = match self.cam_prefs.pivot {
+            Pivot::Cursor => grabbed.unwrap_or(centre),
+            Pivot::Centre => centre,
+        };
+        self.nav.depth = grabbed.map(|g| self.camera.depth_of(g)).filter(|d| *d > 0.0).unwrap_or(self.camera.distance);
+        self.nav.dragging = true;
+        self.nav.spin = Vec2::ZERO;
+        self.nav.recent.clear();
+    }
+
+    /// What the scroll wheel zooms towards at `at`: the model under the cursor, or failing that
+    /// a point as deep as the middle of the view. Zooming keeps that point under the cursor, so
+    /// the answer holds until the cursor or the camera moves.
+    fn zoom_anchor(&mut self, at: Pos2, rect: Rect) -> Vec3 {
+        if let Some((p, w)) = self.nav.zoom_at {
+            if p.distance(at) < 0.5 {
+                return w;
+            }
+        }
+        let (origin, dir) = self.ray(at, rect);
+        let hit = self.mesh.as_ref().and_then(|m| m.raycast(origin, dir)).map(|h| origin + dir * h.t);
+        let eye = self.camera.eye();
+        let w = hit.unwrap_or_else(|| eye + dir * (self.camera.distance / dir.dot(self.camera.forward()).max(1e-3)));
+        self.nav.zoom_at = Some((at, w));
+        w
     }
 
     /// Outer ring is the brush at full pressure. While the pen is down, a filled disc shows the
@@ -1704,15 +1883,21 @@ impl UmberApp {
 
     // ---------------------------------------------------------------- painting
 
-    /// The mesh under a point of the viewport.
-    fn pick(&self, pos: Pos2, rect: Rect) -> Option<mesh::Hit> {
-        let mesh = self.mesh.as_ref()?;
+    /// The ray from the camera through a point of the viewport: where it starts on the near
+    /// plane, and its direction.
+    fn ray(&self, pos: Pos2, rect: Rect) -> (Vec3, Vec3) {
         let x = (pos.x - rect.left()) / rect.width() * 2.0 - 1.0;
         let y = 1.0 - (pos.y - rect.top()) / rect.height() * 2.0;
         let inv = (self.camera.projection(rect.width() / rect.height().max(1.0)) * self.camera.view()).inverse();
         let near = inv.project_point3(glam::Vec3::new(x, y, 0.0));
         let far = inv.project_point3(glam::Vec3::new(x, y, 1.0));
-        mesh.raycast(near, (far - near).normalize())
+        (near, (far - near).normalize())
+    }
+
+    /// The mesh under a point of the viewport.
+    fn pick(&self, pos: Pos2, rect: Rect) -> Option<mesh::Hit> {
+        let (origin, dir) = self.ray(pos, rect);
+        self.mesh.as_ref()?.raycast(origin, dir)
     }
 
     /// Make the material under `pos` the one being painted, when the model has several.
@@ -2882,6 +3067,7 @@ impl UmberApp {
     fn view_bar(&mut self, ctx: &egui::Context, vp: Rect) {
         // Centre in the space left free between the tool rail and the layers panel.
         let free_center_x = (vp.left() + 92.0 + vp.right() - 352.0) * 0.5;
+        let mut camera_button = None;
         egui::Area::new(egui::Id::unique("view_bar"))
             .order(Order::Foreground)
             .pivot(Align2::CENTER_BOTTOM)
@@ -2906,9 +3092,65 @@ impl UmberApp {
                             ],
                             36.0,
                         );
+                        widgets::vdivider(ui, 18.0);
+                        let tip = "Camera: how dragging turns the model and how scrolling zooms";
+                        let b = widgets::icon_button(ui, icons::ROTATE_3D, self.camera_open, 36.0, tip);
+                        if b.clicked() {
+                            self.camera_open = !self.camera_open;
+                        }
+                        camera_button = Some(b.rect);
                     });
                 });
             });
+        if let (true, Some(button)) = (self.camera_open, camera_button) {
+            self.camera_popover(ctx, button);
+        }
+    }
+
+    /// How the camera moves, opened from the view bar.
+    fn camera_popover(&mut self, ctx: &egui::Context, button: Rect) {
+        let mut prefs = self.cam_prefs;
+        let popover = egui::Area::new(egui::Id::unique("camera_popover"))
+            .order(Order::Foreground)
+            .pivot(Align2::CENTER_BOTTOM)
+            .fixed_pos(button.center_top() - egui::vec2(0.0, 18.0))
+            .show(ctx, |ui| {
+                theme::panel_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
+                    let w = 260.0;
+                    ui.set_width(w);
+                    ui.horizontal(|ui| {
+                        widgets::caps_label(ui, "Camera");
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if widgets::icon_button(ui, icons::X, false, 28.0, "Close").clicked() {
+                                self.camera_open = false;
+                            }
+                        });
+                    });
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("Turns about").color(TEXT_2).size(12.0));
+                    widgets::segmented_fill(ui, &mut prefs.pivot, &[(Pivot::Cursor, "What you grab"), (Pivot::Centre, "Model centre")], 30.0);
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Turning").color(TEXT_2).size(12.0));
+                    widgets::segmented_fill(ui, &mut prefs.turning, &[(Turning::Turntable, "Up stays up"), (Turning::Free, "Free")], 30.0);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        widgets::chip(ui, "Zoom to cursor", &mut prefs.zoom_to_cursor)
+                            .on_hover_text("Scrolling zooms towards what's under the cursor");
+                        widgets::chip(ui, "Spin on a flick", &mut prefs.momentum)
+                            .on_hover_text("Let go mid-drag and the model turns on for a moment, then settles");
+                    });
+                    ui.add_space(6.0);
+                    let how = "Right-drag, or Space+drag, turns. Add Shift to move. Scroll zooms.";
+                    ui.label(egui::RichText::new(how).color(TEXT_3).size(11.5));
+                });
+            });
+        if prefs != self.cam_prefs {
+            self.set_cam_prefs(prefs);
+        }
+        let press = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.press_origin() } else { None });
+        if press.is_some_and(|p| !popover.response.rect.contains(p) && !button.contains(p)) {
+            self.camera_open = false;
+        }
     }
 
     fn welcome(&mut self, ctx: &egui::Context, vp: Rect) {
@@ -3270,6 +3512,22 @@ fn panel_divider(ui: &mut egui::Ui) {
 }
 
 /// A menu entry with a one-line explanation under it.
+/// The narrow arrow beside Save that opens Save and Save as.
+fn save_menu_arrow(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 36.0), if enabled { Sense::click() } else { Sense::hover() });
+    let hovered = enabled && resp.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, CornerRadius::same(8), RAISED);
+    }
+    let fg = match (enabled, hovered) {
+        (false, _) => ICON_OFF,
+        (true, true) => TEXT,
+        (true, false) => ICON,
+    };
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, icons::CHEVRON_DOWN, theme::icon_font(13.0), fg);
+    resp.on_hover_text(format!("Save as… ({})", commands::key_label(Cmd::SaveAs).unwrap_or_default()))
+}
+
 fn menu_item(ui: &mut egui::Ui, title: &str, detail: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(240.0, 44.0), Sense::click());
     let p = ui.painter();

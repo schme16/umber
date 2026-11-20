@@ -6,6 +6,7 @@
 use egui::Key;
 
 use crate::app::{Tool, UnwrapMethod, Workspace};
+use crate::camera::{Pivot, Turning};
 use crate::renderer::ViewMode;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -40,6 +41,11 @@ pub enum Cmd {
     LayerUp,
     LayerDown,
     Frame,
+    CameraSettings,
+    TurnAbout(Pivot),
+    Turning(Turning),
+    ZoomToCursor,
+    SpinOnFlick,
     View(ViewMode),
     Workspace(Workspace),
     Unwrap(UnwrapMethod),
@@ -198,6 +204,13 @@ pub const COMMANDS: &[Command] = &[
     c(Cmd::LayerDown, "Move layer down", G::Layers, &[], "lower order below backward", "Move the selected layer below the one under it"),
     // View
     c(Cmd::Frame, "Frame the model", G::View, &[key(Key::F)], "fit zoom focus center centre reset camera home", "Bring the whole model into view"),
+    c(Cmd::CameraSettings, "Camera settings…", G::View, &[], "navigation navigate turn rotate orbit pivot zoom pan move model view options trackball turntable momentum", "Choose how dragging turns the model and how scrolling zooms"),
+    c(Cmd::TurnAbout(Pivot::Cursor), "Turn about what you grab", G::View, &[], "rotate orbit pivot point under cursor mouse pick natural hold object camera", "The point under the cursor stays put while the model turns about it"),
+    c(Cmd::TurnAbout(Pivot::Centre), "Turn about the model's centre", G::View, &[], "rotate orbit pivot center centre middle classic camera", "The model always turns about its own middle"),
+    c(Cmd::Turning(Turning::Turntable), "Turning keeps up up", G::View, &[], "turntable rotate orbit level upright horizon camera", "Sideways drags turn about the vertical, so the model never tips over"),
+    c(Cmd::Turning(Turning::Free), "Free turning", G::View, &[], "trackball arcball tumble roll rotate orbit any direction upside down camera", "The model rolls whichever way you drag, like a ball under your hand"),
+    c(Cmd::ZoomToCursor, "Zoom towards the cursor", G::View, &[], "scroll wheel dolly zoom mouse point camera", "Scrolling zooms towards what's under the cursor, not the middle of the view"),
+    c(Cmd::SpinOnFlick, "Keep turning after a flick", G::View, &[], "momentum inertia spin spinning stop throw coast ease glide camera", "Let go mid-drag and the model turns on for a moment, then settles"),
     c(Cmd::View(ViewMode::Lit), "Lit view", G::View, &[], "lighting shaded render pbr material", "See the model lit, as it will look in the game"),
     c(Cmd::View(ViewMode::Colour), "Colour view", G::View, &[], "albedo base unlit flat diffuse color", "See only the base colour, without lighting"),
     c(Cmd::View(ViewMode::UvCheck), "UV checker view", G::View, &[], "checker grid stretch distortion", "Cover the model in a checker to show how its UVs stretch"),
@@ -378,8 +391,14 @@ mod tests {
         ("undo", Cmd::Undo),
         ("oops", Cmd::Undo),
         ("redo", Cmd::Redo),
-        ("rotate the model", Cmd::Shortcuts),
-        ("orbit", Cmd::Shortcuts),
+        ("rotate the model", Cmd::CameraSettings),
+        ("orbit", Cmd::CameraSettings),
+        ("orbit around the center", Cmd::TurnAbout(Pivot::Centre)),
+        ("rotate around pivot", Cmd::TurnAbout(Pivot::Cursor)),
+        ("trackball", Cmd::Turning(Turning::Free)),
+        ("turntable", Cmd::Turning(Turning::Turntable)),
+        ("camera options", Cmd::CameraSettings),
+        ("stop the model spinning", Cmd::SpinOnFlick),
         ("rubber", Cmd::Tool(Tool::Eraser)),
         ("eyedropper", Cmd::Tool(Tool::Picker)),
         ("paint bucket", Cmd::Tool(Tool::Fill)),

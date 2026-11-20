@@ -15,7 +15,8 @@
 #
 # Vulkan draws on the real card under Xvfb (only presenting goes through X), so this is the
 # GPU path, not llvmpipe: the log line "GPU: ..." in $OUT/umber.log says which adapter ran.
-# Output goes to $OUT (default target/captures).
+# Output goes to $OUT (default target/captures). BIN=target/release/umber captures the release
+# build, for anything that has to keep up with the pointer.
 set -euo pipefail
 
 SIZE=${SIZE:-1600x1000}
@@ -35,7 +36,7 @@ export UMBER_CONFIG_DIR=${UMBER_CONFIG_DIR:-$(mktemp -d)}
 # Likewise recovery copies, so a capture never leaves "unsaved work" on the real welcome card.
 export UMBER_RECOVERY_DIR=${UMBER_RECOVERY_DIR:-$(mktemp -d)}
 
-WGPU_BACKEND=vulkan ./target/debug/umber "$@" > "$OUT/umber.log" 2>&1 &
+WGPU_BACKEND=vulkan "${BIN:-./target/debug/umber}" "$@" > "$OUT/umber.log" 2>&1 &
 APP=$!
 REC=""
 cleanup() {

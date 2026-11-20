@@ -136,8 +136,12 @@ pub struct Settings {
 pub struct CameraInfo {
     pub target: [f32; 3],
     pub distance: f32,
+    /// Its yaw and pitch, for files from before free turning (and for reading by eye).
     pub yaw: f32,
     pub pitch: f32,
+    /// The camera's whole turn as a quaternion (x, y, z, w), which can include a roll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rot: Option<[f32; 4]>,
 }
 
 // ---------------------------------------------------------------- saving

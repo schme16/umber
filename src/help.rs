@@ -232,7 +232,7 @@ fn keycaps(ui: &egui::Ui, at: egui::Pos2, k: commands::Shortcut, bright: bool) {
 
 /// Mouse and pen moves, which aren't commands but belong on the sheet.
 const GESTURES: &[(&str, &str)] = &[
-    ("Turn the model", "Right-drag, or hold Space or Alt and drag"),
+    ("Turn the model", "Right-drag, or hold Space or Alt and drag; it turns about the point you grab"),
     ("Move the model", "Shift+right-drag"),
     ("Zoom", "Scroll"),
     ("Fill the whole material", "Shift+click with Fill"),
@@ -381,6 +381,11 @@ struct Prefs {
     recent_textures: Vec<PathBuf>,
     /// The F3 stats overlay was open when Umber last closed.
     stats_open: bool,
+    /// How the camera turns, pans and zooms.
+    camera: crate::camera::CameraPrefs,
+    /// The folder of the last model or project opened or saved, where the next Open or Save
+    /// as starts.
+    last_folder: Option<PathBuf>,
 }
 
 /// Remembers which tips have been seen, in `$XDG_CONFIG_HOME/umber/prefs.json`.
@@ -448,6 +453,8 @@ impl Tips {
         self.prefs = Prefs {
             recent_textures: std::mem::take(&mut self.prefs.recent_textures),
             stats_open: self.prefs.stats_open,
+            camera: self.prefs.camera,
+            last_folder: self.prefs.last_folder.take(),
             ..Prefs::default()
         };
         self.write();
@@ -460,6 +467,30 @@ impl Tips {
     pub fn set_stats_open(&mut self, open: bool) {
         self.prefs.stats_open = open;
         self.write();
+    }
+
+    pub fn camera(&self) -> crate::camera::CameraPrefs {
+        self.prefs.camera
+    }
+
+    pub fn set_camera(&mut self, camera: crate::camera::CameraPrefs) {
+        if self.prefs.camera != camera {
+            self.prefs.camera = camera;
+            self.write();
+        }
+    }
+
+    pub fn last_folder(&self) -> Option<&std::path::Path> {
+        self.prefs.last_folder.as_deref().filter(|d| d.is_dir())
+    }
+
+    /// Open and Save as start in the folder `file` is in, from now on.
+    pub fn remember_folder(&mut self, file: &std::path::Path) {
+        let dir = file.parent().filter(|d| !d.as_os_str().is_empty()).map(std::path::Path::to_owned);
+        if dir.is_some() && dir != self.prefs.last_folder {
+            self.prefs.last_folder = dir;
+            self.write();
+        }
     }
 
     pub fn recent_textures(&self) -> &[PathBuf] {

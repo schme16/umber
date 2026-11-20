@@ -27,3 +27,4 @@ pub const SEARCH: char = '\u{e155}';
 pub const LIGHTBULB: char = '\u{e1c2}';
 pub const SWAP: char = '\u{e41c}'; // arrow-right-left
 pub const IMAGE_PLUS: char = '\u{e1f7}';
+pub const ROTATE_3D: char = '\u{e2ea}';
