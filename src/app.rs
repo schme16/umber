@@ -1653,6 +1653,14 @@ impl UmberApp {
             || response.dragged_by(egui::PointerButton::Extra1)
             || response.dragged_by(egui::PointerButton::Extra2)
             || (hand && self.stroke.is_none() && response.dragged_by(egui::PointerButton::Primary));
+        // Shift moves instead of turning. So do two navigation inputs at once, so a pen can pan
+        // with two buttons: Space (Huion's third button) with Alt or a right, middle or extra
+        // button (what Huion's driver gives its second).
+        let other_button = response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle)
+            || response.dragged_by(egui::PointerButton::Extra1)
+            || response.dragged_by(egui::PointerButton::Extra2);
+        let pan = shift || (space && (alt || other_button));
         let (now, dt, hover, pressed_any) =
             ui.input(|i| (i.time, i.stable_dt.min(0.05), i.pointer.hover_pos(), i.pointer.any_pressed()));
         if pressed_any && response.hovered() {
@@ -1665,14 +1673,14 @@ impl UmberApp {
                 self.start_nav(origin, rect);
             }
             if delta != Vec2::ZERO {
-                if shift {
+                if pan {
                     self.camera.pan(delta.x, delta.y, rect.height(), self.nav.depth);
                 } else {
                     self.camera.turn(delta.x, delta.y, self.nav.pivot, self.cam_prefs.turning);
                 }
                 self.nav.zoom_at = None;
             }
-            self.nav.recent.push((now, if shift { Vec2::ZERO } else { delta }));
+            self.nav.recent.push((now, if pan { Vec2::ZERO } else { delta }));
             self.nav.recent.retain(|(t, _)| now - t < FLICK_WINDOW);
         } else if self.nav.dragging {
             self.nav.dragging = false;
@@ -1772,7 +1780,7 @@ impl UmberApp {
         }
 
         // While turning, a small brass dot marks what the model turns about.
-        if self.nav.dragging && !shift && self.mesh.is_some() {
+        if self.nav.dragging && !pan && self.mesh.is_some() {
             let clip = proj * view * self.nav.pivot.extend(1.0);
             if clip.w > 0.0 {
                 let ndc = clip.truncate() / clip.w;
@@ -3140,7 +3148,7 @@ impl UmberApp {
                             .on_hover_text("Let go mid-drag and the model turns on for a moment, then settles");
                     });
                     ui.add_space(6.0);
-                    let how = "Right-drag, or Space+drag, turns. Add Shift to move. Scroll zooms.";
+                    let how = "Right-drag, or Space+drag, turns. Shift, or both pen buttons, moves it instead. Scroll zooms.";
                     ui.label(egui::RichText::new(how).color(TEXT_3).size(11.5));
                 });
             });

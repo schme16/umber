@@ -233,7 +233,7 @@ fn keycaps(ui: &egui::Ui, at: egui::Pos2, k: commands::Shortcut, bright: bool) {
 /// Mouse and pen moves, which aren't commands but belong on the sheet.
 const GESTURES: &[(&str, &str)] = &[
     ("Turn the model", "Right-drag, or hold Space or Alt and drag; it turns about the point you grab"),
-    ("Move the model", "Shift+right-drag"),
+    ("Move the model", "Shift+right-drag, or hold both pen buttons and drag"),
     ("Zoom", "Scroll"),
     ("Fill the whole material", "Shift+click with Fill"),
 ];

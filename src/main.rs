@@ -35,6 +35,18 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     options
 }
 
+/// The app icon on the window, for taskbars and Alt+Tab.
+fn window_icon() -> egui::IconData {
+    let png = include_bytes!("../assets/icon/umber-256.png");
+    match image::load_from_memory_with_format(png, image::ImageFormat::Png) {
+        Ok(img) => {
+            let img = img.into_rgba8();
+            egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() }
+        }
+        Err(_) => egui::IconData::default(),
+    }
+}
+
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("umber=info,wgpu=warn"))
         .init();
@@ -45,7 +57,8 @@ fn main() -> eframe::Result {
             .with_app_id("umber")
             .with_inner_size([1600.0, 1000.0])
             .with_min_inner_size([960.0, 600.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(window_icon()),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: wgpu_options(),
         ..Default::default()
