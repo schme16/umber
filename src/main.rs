@@ -8,6 +8,7 @@ mod history;
 mod icons;
 mod mesh;
 mod pen;
+mod project;
 mod renderer;
 mod texset;
 mod theme;

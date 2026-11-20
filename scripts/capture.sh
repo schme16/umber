@@ -40,7 +40,7 @@ trap cleanup EXIT
 
 WIN=""
 for _ in $(seq 1 80); do
-    WIN=$(xdotool search --name '^Umber$' 2>/dev/null | head -1 || true)
+    WIN=$(xdotool search --name 'Umber$' 2>/dev/null | head -1 || true)
     [ -n "$WIN" ] && break
     sleep 0.25
 done

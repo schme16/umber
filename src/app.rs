@@ -16,6 +16,7 @@ use glam::Vec3;
 use crate::history::{Applied, Change, History};
 use crate::mesh::{self, Mesh};
 use crate::pen::{PenInput, PressureCurve};
+use crate::project;
 use crate::renderer::{FrameParams, ViewMode, ViewportRenderer};
 use crate::texset::{self, BlendMode, Channels, Compositor, Fill, Layer, LayerKind, Mask, TextureSet};
 use crate::theme::{self, *};
@@ -156,7 +157,14 @@ impl Tool {
 
 /// Dabs sit this fraction of the brush's diameter apart.
 const SPACING: f32 = 0.1;
+/// Seconds of no editing before unsaved work is copied to the recovery folder...
+const AUTOSAVE_PAUSE: f64 = 2.0;
+/// ...and the least time between copies.
+const AUTOSAVE_EVERY: f64 = 30.0;
 
+/// Saved in project files, all but the pen curve (that belongs to the tablet, not the work).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct BrushSettings {
     size: f32,
     opacity: f32,
@@ -171,6 +179,7 @@ struct BrushSettings {
     pen_size: bool,
     pen_opacity: bool,
     pen_tilt: bool,
+    #[serde(skip)]
     curve: PressureCurve,
     paint_colour: bool,
     paint_rough: bool,
@@ -230,6 +239,24 @@ struct ExportJob {
     result: mpsc::Receiver<anyhow::Result<()>>,
 }
 
+/// A project save running on a worker thread.
+struct SaveJob {
+    path: PathBuf,
+    /// The history state it holds.
+    state: u64,
+    /// The work it belongs to (see [`UmberApp::document`]).
+    document: u64,
+    done: Arc<AtomicU32>,
+    steps: u32,
+    result: mpsc::Receiver<anyhow::Result<()>>,
+}
+
+/// Something that replaces the open work, held while "Save changes?" is asked.
+enum Pending {
+    Open(PathBuf),
+    Close,
+}
+
 enum LayerAction {
     Up,
     Down,
@@ -238,6 +265,7 @@ enum LayerAction {
 }
 
 pub struct UmberApp {
+    ctx: egui::Context,
     rs: egui_wgpu::RenderState,
     renderer: ViewportRenderer,
     camera: OrbitCamera,
@@ -291,6 +319,30 @@ pub struct UmberApp {
     export_job: Option<ExportJob>,
     /// What the last export wrote, and when.
     last_export: Option<(String, f64)>,
+
+    /// Where Ctrl+S writes; `None` until the work is saved once.
+    project_path: Option<PathBuf>,
+    /// The history state as last saved (or opened). Anything else is unsaved.
+    saved_state: u64,
+    /// Bumped whenever different work is opened, so a save finishing late knows it's stale.
+    document: u64,
+    save_job: Option<SaveJob>,
+    /// Unsaved work is copied here now and then, for the welcome card to offer after a crash.
+    recovery_path: Option<PathBuf>,
+    /// The history state the recovery copy holds, if one has been written.
+    recovery_state: Option<u64>,
+    autosave_job: Option<SaveJob>,
+    /// When the history state last changed (state, time), so autosave waits for a pause.
+    last_change: (u64, f64),
+    last_autosave: f64,
+    /// Unsaved work an earlier Umber left behind, offered on the welcome card.
+    recoverable: Vec<project::Recoverable>,
+    /// Waiting on "Save changes?"; the flag is set once Save is chosen and the save runs.
+    pending: Option<(Pending, bool)>,
+    /// The close was agreed to; let it through.
+    closing: bool,
+    /// The window title as last set.
+    title: String,
 }
 
 impl UmberApp {
@@ -303,6 +355,7 @@ impl UmberApp {
         let compositor = Compositor::new(&rs.device, &rs.queue);
         let brush_engine = BrushEngine::new(&rs.device);
         let mut app = Self {
+            ctx: cc.egui_ctx.clone(),
             rs,
             renderer,
             camera: OrbitCamera::default(),
@@ -340,24 +393,52 @@ impl UmberApp {
             export_size: export::SIZES[0],
             export_job: None,
             last_export: None,
+            project_path: None,
+            saved_state: 0,
+            document: 0,
+            save_job: None,
+            recovery_path: None,
+            recovery_state: None,
+            autosave_job: None,
+            last_change: (0, 0.0),
+            last_autosave: f64::NEG_INFINITY,
+            recoverable: project::recoverable(),
+            pending: None,
+            closing: false,
+            title: String::new(),
         };
+        project::sweep_recovery_dir();
         if let Some(path) = initial_file {
-            app.open_path(&path, 0.0);
+            app.open_now(&path);
         }
         app
     }
 
     fn set_mesh(&mut self, mesh: Mesh) {
+        let (device, queue) = (&self.rs.device, &self.rs.queue);
+        let sets = mesh.materials.iter().map(|m| self.compositor.new_set(device, queue, m)).collect();
+        self.install(mesh, sets);
+    }
+
+    /// Make this the open work: a model with its texture sets, nothing to undo, nothing unsaved.
+    fn install(&mut self, mesh: Mesh, sets: Vec<TextureSet>) {
         if self.stroke.take().is_some() {
             self.brush_engine.end(&self.rs.device, &self.rs.queue);
         }
         if let Some(job) = self.unwrap_job.take() {
             job.progress.cancel();
         }
-        let (device, queue) = (&self.rs.device, &self.rs.queue);
-        self.sets = mesh.materials.iter().map(|m| self.compositor.new_set(device, queue, m)).collect();
+        self.sets = sets;
         self.active_set = 0;
         self.history.clear();
+        self.saved_state = self.history.state();
+        self.last_change = (self.saved_state, self.now);
+        self.document += 1;
+        self.project_path = None;
+        self.recovery_path = None;
+        self.recovery_state = None;
+        self.model_path = None;
+        self.last_export = None;
         let (center, radius) = mesh.bounding_sphere();
         self.camera = OrbitCamera::default();
         self.camera.frame(center, radius);
@@ -677,40 +758,397 @@ impl UmberApp {
         });
     }
 
-    fn open_path(&mut self, path: &Path, now: f64) {
+    // ---------------------------------------------------------------- open and save
+
+    /// Open a model or a project, asking about unsaved changes first.
+    fn open_path(&mut self, path: &Path) {
+        self.replace_work(Pending::Open(path.to_owned()));
+    }
+
+    fn open_dialog(&mut self) {
+        let mut extensions = vec![project::EXTENSION];
+        extensions.extend_from_slice(mesh::SUPPORTED_EXTENSIONS);
+        let picked = rfd::FileDialog::new()
+            .set_title("Open a model or project")
+            .add_filter("Models and Umber projects", &extensions)
+            .pick_file();
+        if let Some(path) = picked {
+            self.open_path(&path);
+        }
+    }
+
+    /// Do `then` now if nothing is unsaved, otherwise ask first.
+    fn replace_work(&mut self, then: Pending) {
+        if self.unsaved() {
+            self.pending = Some((then, false));
+        } else {
+            self.carry_out(then);
+        }
+    }
+
+    /// The open work is saved or let go: do what was waiting.
+    fn carry_out(&mut self, then: Pending) {
+        self.pending = None;
+        self.discard_recovery();
+        match then {
+            Pending::Open(path) => self.open_now(&path),
+            Pending::Close => {
+                self.closing = true;
+                // A copy half written now would come back as unsaved work next time.
+                if let Some(job) = self.autosave_job.take() {
+                    let _ = job.result.recv();
+                    let _ = std::fs::remove_file(&job.path);
+                }
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    fn open_now(&mut self, path: &Path) {
+        if project::is_project(path) {
+            self.open_project(path, false);
+            return;
+        }
         match mesh::load(path) {
             Ok(mesh) => {
                 // A model without UVs gets the unwrap card instead.
                 let note = mesh.has_uvs.then(|| format!("Opened {} · {} triangles", mesh.name, fmt_count(mesh.triangle_count())));
                 self.set_mesh(mesh);
                 self.model_path = Some(path.to_owned());
-                self.last_export = None;
-                self.toast = note.map(|n| (n, now));
+                self.toast = note.map(|n| (n, self.now));
             }
             Err(e) => {
                 log::error!("{e:#}");
-                self.toast = Some((format!("{e:#}"), now));
+                self.toast = Some((format!("{e:#}"), self.now));
             }
         }
     }
 
-    fn open_dialog(&mut self, now: f64) {
-        let picked = rfd::FileDialog::new()
-            .set_title("Open a model")
-            .add_filter("3D models", mesh::SUPPORTED_EXTENSIONS)
-            .pick_file();
-        if let Some(path) = picked {
-            self.open_path(&path, now);
+    /// Open a project file, or (`recovered`) unsaved work from the recovery folder.
+    fn open_project(&mut self, path: &Path, recovered: bool) {
+        let started = std::time::Instant::now();
+        let loaded = project::read(path).map(|l| l.into_sets(&self.rs.device, &self.rs.queue, &self.compositor));
+        let (mesh, settings, sets) = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::error!("{e:#}");
+                self.toast = Some((format!("{e:#}"), self.now));
+                return;
+            }
+        };
+        log::info!("opened {} in {:.0?}", path.display(), started.elapsed());
+        self.install(mesh, sets);
+        let saved_as = settings.project_path.clone();
+        self.apply_settings(settings);
+        self.recoverable.retain(|r| r.path != path);
+        if recovered {
+            // Unsaved until it is saved somewhere real; autosave carries on into the same copy.
+            self.project_path = saved_as;
+            self.saved_state = u64::MAX;
+            self.recovery_path = Some(path.to_owned());
+            self.recovery_state = Some(self.history.state());
+            self.toast = Some(("Recovered your unsaved work. Save it to keep it (Ctrl+S).".into(), self.now));
+        } else {
+            self.project_path = Some(path.to_owned());
+            self.toast = Some((format!("Opened {}", project::display_name(path)), self.now));
         }
     }
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context, now: f64) {
+    /// The camera, brush, colours, view and export choices a project file brings back.
+    fn apply_settings(&mut self, s: project::Settings) {
+        if let Some(c) = s.camera {
+            self.camera.target = Vec3::from(c.target);
+            self.camera.distance = c.distance;
+            self.camera.yaw = c.yaw;
+            self.camera.pitch = c.pitch;
+        }
+        if let Ok(mut brush) = serde_json::from_value::<BrushSettings>(s.brush) {
+            brush.curve = self.brush.curve;
+            self.brush = brush;
+        }
+        let colour = |c: [u8; 4]| Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]);
+        if let Some(c) = s.primary {
+            self.primary = colour(c);
+        }
+        if let Some(c) = s.secondary {
+            self.secondary = colour(c);
+        }
+        self.active_set = s.active_set.min(self.sets.len().saturating_sub(1));
+        let modes = [ViewMode::Lit, ViewMode::Colour, ViewMode::UvCheck, ViewMode::Normals];
+        if let Some(mode) = modes.into_iter().find(|m| format!("{m:?}") == s.view_mode) {
+            self.view_mode = mode;
+        }
+        self.light_yaw = s.light_yaw.unwrap_or(self.light_yaw);
+        self.exposure = s.exposure.unwrap_or(self.exposure);
+        self.model_path = s.model_path;
+        if s.export_dir.is_some() {
+            self.export_dir = s.export_dir;
+        }
+        if let Some(size) = s.export_size.filter(|s| export::SIZES.contains(s)) {
+            self.export_size = size;
+        }
+    }
+
+    fn settings(&self) -> project::Settings {
+        let c = &self.camera;
+        project::Settings {
+            camera: Some(project::CameraInfo { target: c.target.into(), distance: c.distance, yaw: c.yaw, pitch: c.pitch }),
+            brush: serde_json::to_value(&self.brush).unwrap_or_default(),
+            primary: Some(self.primary.to_array()),
+            secondary: Some(self.secondary.to_array()),
+            active_set: self.active_set,
+            view_mode: format!("{:?}", self.view_mode),
+            light_yaw: Some(self.light_yaw),
+            exposure: Some(self.exposure),
+            model_path: self.model_path.clone(),
+            export_dir: self.export_dir.clone(),
+            export_size: Some(self.export_size),
+            project_path: None,
+        }
+    }
+
+    fn unsaved(&self) -> bool {
+        self.mesh.is_some() && self.history.state() != self.saved_state
+    }
+
+    /// The project's file name once saved, the model's name before that.
+    fn work_name(&self) -> String {
+        match (&self.project_path, &self.mesh) {
+            (Some(p), _) => p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            (None, Some(m)) => m.name.clone(),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// Ctrl+S, or with `choose` Ctrl+Shift+S. Returns whether a save is now running.
+    fn save(&mut self, choose: bool) -> bool {
+        if self.mesh.is_none() {
+            self.toast = Some(("Open a model first; then there's something to save.".into(), self.now));
+            return false;
+        }
+        if self.save_job.is_some() {
+            return true;
+        }
+        let path = match (&self.project_path, choose) {
+            (Some(p), false) => p.clone(),
+            _ => match self.pick_save_path() {
+                Some(p) => p,
+                None => return false,
+            },
+        };
+        self.start_save(path, false);
+        true
+    }
+
+    fn pick_save_path(&self) -> Option<PathBuf> {
+        // Scripted captures set this, since a save dialog would open on the real desktop.
+        if let Some(path) = std::env::var_os("UMBER_SAVE_PATH") {
+            return Some(PathBuf::from(path));
+        }
+        let name = match &self.project_path {
+            Some(p) => project::display_name(p),
+            None => format!("{}.{}", self.work_name(), project::EXTENSION),
+        };
+        let dir = self.project_path.as_ref().or(self.model_path.as_ref()).and_then(|p| p.parent());
+        let mut dialog = rfd::FileDialog::new().set_title("Save project").add_filter("Umber project", &[project::EXTENSION]).set_file_name(name);
+        if let Some(dir) = dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let path = dialog.save_file()?;
+        if project::is_project(&path) {
+            return Some(path);
+        }
+        let mut with_ext = path.into_os_string();
+        with_ext.push(format!(".{}", project::EXTENSION));
+        Some(PathBuf::from(with_ext))
+    }
+
+    /// Copy the work on the GPU now, and compress and write it on a worker.
+    fn start_save(&mut self, path: PathBuf, recovery: bool) {
+        self.end_stroke();
+        self.history.record_stack_changes(&mut self.sets);
+        let Some(mesh) = &self.mesh else { return };
+        let mut settings = self.settings();
+        if recovery {
+            settings.project_path = self.project_path.clone();
+        }
+        let snapshot = project::Snapshot::take(&self.rs.device, &self.rs.queue, mesh, &self.sets, settings);
+        let (done, steps, result) = project::save_in_background(snapshot, path.clone());
+        let job = SaveJob { path, state: self.history.state(), document: self.document, done, steps, result };
+        if recovery {
+            self.autosave_job = Some(job);
+        } else {
+            self.save_job = Some(job);
+        }
+    }
+
+    fn poll_saves(&mut self, ctx: &egui::Context) {
+        if let Some((job, outcome)) = finished(&mut self.save_job, ctx) {
+            match outcome {
+                Ok(()) if job.document == self.document => {
+                    self.saved_state = job.state;
+                    self.project_path = Some(job.path.clone());
+                    self.toast = Some((format!("Saved {}", home_relative(&job.path)), self.now));
+                    if !self.unsaved() {
+                        self.discard_recovery();
+                    }
+                    if let Some((then, true)) = self.pending.take() {
+                        self.carry_out(then);
+                    }
+                }
+                // Work that has since been closed; nothing here to update.
+                Ok(()) => {}
+                Err(e) => {
+                    log::error!("{e:#}");
+                    self.toast = Some((format!("Couldn't save: {e:#}"), self.now));
+                    // Ask again rather than carry on as if it had saved.
+                    if let Some((_, waiting)) = &mut self.pending {
+                        *waiting = false;
+                    }
+                }
+            }
+        }
+        if let Some((job, outcome)) = finished(&mut self.autosave_job, ctx) {
+            match outcome {
+                Ok(()) if job.document == self.document && self.unsaved() => self.recovery_state = Some(job.state),
+                // Saved or let go while it was writing: the copy isn't needed.
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&job.path);
+                }
+                Err(e) => log::warn!("couldn't keep a recovery copy: {e:#}"),
+            }
+        }
+    }
+
+    /// Keep a recovery copy of unsaved work: after a short pause in editing, at most every
+    /// [`AUTOSAVE_EVERY`] seconds, never mid-stroke.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        let state = self.history.state();
+        if state != self.last_change.0 {
+            self.last_change = (state, self.now);
+        }
+        if !self.unsaved() || self.recovery_state == Some(state) || self.autosave_job.is_some() || self.stroke.is_some() || self.closing {
+            return;
+        }
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        let wait = (AUTOSAVE_PAUSE - (self.now - self.last_change.1)).max(AUTOSAVE_EVERY - (self.now - self.last_autosave));
+        if wait > 0.0 {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+            return;
+        }
+        let Some(path) = self.recovery_path.clone().or_else(|| project::new_recovery_path(&self.work_name())) else { return };
+        self.recovery_path = Some(path.clone());
+        self.last_autosave = self.now;
+        self.start_save(path, true);
+    }
+
+    /// The work is saved or let go: its recovery copy goes.
+    fn discard_recovery(&mut self) {
+        if self.recovery_state.take().is_some() {
+            if let Some(path) = &self.recovery_path {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// "Save changes?" while something waits to replace the open work.
+    fn save_changes_modal(&mut self, ctx: &egui::Context) {
+        let Some((then, waiting)) = &self.pending else { return };
+        let waiting = *waiting;
+        let doing = match then {
+            Pending::Open(_) => "Opening another file closes this one.",
+            Pending::Close => "Umber is closing.",
+        };
+        let name = self.work_name();
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::unique("save-changes")).frame(theme::panel_frame().inner_margin(Margin::same(24))).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(egui::RichText::new(format!("Save changes to {name}?")).font(theme::semibold(17.0)));
+            ui.add_space(6.0);
+            let note = if waiting { "Saving…".to_owned() } else { format!("{doing} Changes since the last save are lost if you don't save them.") };
+            ui.label(egui::RichText::new(note).color(TEXT_2));
+            ui.add_space(20.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if widgets::button(ui, if waiting { "Saving…" } else { "Save" }, true, 36.0).clicked() && !waiting {
+                    choice = Some(0);
+                }
+                if widgets::button(ui, "Don't save", false, 36.0).clicked() {
+                    choice = Some(1);
+                }
+                if widgets::button(ui, "Cancel", false, 36.0).clicked() {
+                    choice = Some(2);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(2);
+        }
+        match choice {
+            Some(0) => {
+                if self.save(false) {
+                    if let Some((_, waiting)) = &mut self.pending {
+                        *waiting = true;
+                    }
+                }
+            }
+            Some(1) => {
+                if let Some((then, _)) = self.pending.take() {
+                    self.carry_out(then);
+                }
+            }
+            Some(_) => self.pending = None,
+            None => {}
+        }
+    }
+
+    /// The window close button: ask about unsaved work, otherwise tidy up and go.
+    fn handle_close(&mut self, ctx: &egui::Context) {
+        if self.closing || !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if self.unsaved() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.pending.is_none() {
+                self.pending = Some((Pending::Close, false));
+            }
+        } else {
+            self.carry_out(Pending::Close);
+        }
+    }
+
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = match &self.mesh {
+            None => "Umber".to_owned(),
+            Some(_) if self.unsaved() => format!("● {} · Umber", self.work_name()),
+            Some(_) => format!("{} · Umber", self.work_name()),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| Some(f.path().to_path_buf())).collect());
         if let Some(path) = dropped.first() {
-            self.open_path(path, now);
+            self.open_path(path);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
-            self.open_dialog(now);
+            self.open_dialog();
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
+            // Goes through handle_close like the window's close button.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // Save as first: Ctrl+S also matches Ctrl+Shift+S.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S)) {
+            self.save(true);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+            self.save(false);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
             self.export_to_godot();
@@ -785,7 +1223,7 @@ impl UmberApp {
 
     // ---------------------------------------------------------------- top bar
 
-    fn top_bar(&mut self, ui: &mut egui::Ui, now: f64) {
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, TOPBAR_LINE));
 
@@ -795,8 +1233,20 @@ impl UmberApp {
             draw_logo_u(ui.painter(), mark);
             ui.label(egui::RichText::new("Umber").font(theme::semibold(14.0)));
             widgets::vdivider(ui, 18.0);
-            let name = self.mesh.as_ref().map(|m| m.name.as_str()).unwrap_or("No model open");
-            ui.label(egui::RichText::new(name).color(TEXT_2));
+            if self.mesh.is_none() {
+                ui.label(egui::RichText::new("No model open").color(TEXT_2));
+                return;
+            }
+            let name = ui.label(egui::RichText::new(self.work_name()).color(TEXT_2));
+            if let Some(path) = &self.project_path {
+                name.on_hover_text(home_relative(path));
+            }
+            if let Some(job) = &self.save_job {
+                let f = job.done.load(Ordering::Relaxed) as f32 / job.steps.max(1) as f32;
+                ui.label(egui::RichText::new(format!("Saving {}", pct(f))).color(TEXT_3));
+            } else if self.unsaved() {
+                ui.label(egui::RichText::new("●").size(10.0).color(ACCENT)).on_hover_text("Unsaved changes (Ctrl+S saves)");
+            }
         });
 
         let labels = ["Paint", "UV", "Materials", "Export"];
@@ -836,8 +1286,15 @@ impl UmberApp {
             if widgets::icon_action(ui, icons::UNDO, self.history.can_undo(), 36.0, "Undo (Ctrl+Z)").clicked() {
                 self.undo();
             }
-            if widgets::icon_button(ui, icons::FOLDER_OPEN, false, 36.0, "Open a model (Ctrl+O)").clicked() {
-                self.open_dialog(now);
+            let save_tip = match &self.project_path {
+                Some(p) => format!("Save to {} (Ctrl+S)", home_relative(p)),
+                None => "Save as a project, layers and all (Ctrl+S)".to_owned(),
+            };
+            if widgets::icon_action(ui, icons::SAVE, self.mesh.is_some(), 36.0, &save_tip).clicked() {
+                self.save(false);
+            }
+            if widgets::icon_button(ui, icons::FOLDER_OPEN, false, 36.0, "Open a model or project (Ctrl+O)").clicked() {
+                self.open_dialog();
             }
         });
     }
@@ -1902,7 +2359,7 @@ impl UmberApp {
             });
     }
 
-    fn welcome(&mut self, ctx: &egui::Context, vp: Rect, now: f64) {
+    fn welcome(&mut self, ctx: &egui::Context, vp: Rect) {
         egui::Area::new(egui::Id::unique("welcome")).order(Order::Foreground).pivot(Align2::CENTER_CENTER).fixed_pos(vp.center()).show(ctx, |ui| {
             theme::panel_frame().inner_margin(Margin::same(28)).show(ui, |ui| {
                 ui.set_width(380.0);
@@ -1911,10 +2368,10 @@ impl UmberApp {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("Open a model to start painting").font(theme::semibold(18.0)));
                     ui.add_space(2.0);
-                    ui.label(egui::RichText::new("Drop a .glb, .gltf or .obj file anywhere in this window.").color(TEXT_3));
+                    ui.label(egui::RichText::new("Drop a model or an .umber project anywhere in this window.").color(TEXT_3));
                     ui.add_space(16.0);
                     if widgets::button(ui, "Open model…", true, 40.0).clicked() {
-                        self.open_dialog(now);
+                        self.open_dialog();
                     }
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Ctrl+O").font(theme::mono(11.0)).color(TEXT_3));
@@ -1935,9 +2392,50 @@ impl UmberApp {
                             self.set_mesh(mesh::cube());
                         }
                     });
+                    self.recovery_list(ui);
                 });
             });
         });
+    }
+
+    /// Unsaved work an earlier Umber left behind (it closed without saving, or crashed).
+    fn recovery_list(&mut self, ui: &mut egui::Ui) {
+        if self.recoverable.is_empty() {
+            return;
+        }
+        ui.add_space(10.0);
+        panel_divider(ui);
+        ui.label(egui::RichText::new("Unsaved work from last time").color(TEXT_3).size(12.0));
+        ui.add_space(4.0);
+        let (mut recover, mut discard) = (None, None);
+        for (i, r) in self.recoverable.iter().take(3).enumerate() {
+            let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::hover());
+            ui.scope_builder(UiBuilder::new().max_rect(row).layout(Layout::left_to_right(Align::Center)), |ui| {
+                ui.label(egui::RichText::new(icons::HISTORY).font(theme::icon_font(16.0)).color(ACCENT));
+                ui.add_space(2.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add(egui::Label::new(egui::RichText::new(&r.name).color(TEXT)).truncate());
+                    let age = r.modified.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
+                    ui.label(egui::RichText::new(when(age)).color(TEXT_3).size(11.5));
+                });
+            });
+            ui.scope_builder(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)), |ui| {
+                if widgets::icon_action(ui, icons::X, true, 30.0, "Throw this away").clicked() {
+                    discard = Some(i);
+                }
+                if widgets::button(ui, "Recover", false, 30.0).on_hover_text(home_relative(&r.path)).clicked() {
+                    recover = Some(r.path.clone());
+                }
+            });
+        }
+        if let Some(i) = discard {
+            let gone = self.recoverable.remove(i);
+            let _ = std::fs::remove_file(&gone.path);
+        }
+        if let Some(path) = recover {
+            self.open_project(&path, true);
+        }
     }
 
     fn workspace_placard(&mut self, ctx: &egui::Context, vp: Rect) {
@@ -1988,15 +2486,19 @@ impl eframe::App for UmberApp {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         self.now = now;
-        self.handle_shortcuts(&ctx, now);
+        self.handle_close(&ctx);
+        if self.pending.is_none() {
+            self.handle_shortcuts(&ctx);
+        }
         self.poll_unwrap(&ctx);
         self.poll_export(&ctx);
+        self.poll_saves(&ctx);
 
         egui::Panel::top("top_bar")
             .exact_size(52.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(TOPBAR).inner_margin(Margin::symmetric(16, 0)))
-            .show(ui, |ui| self.top_bar(ui, now));
+            .show(ui, |ui| self.top_bar(ui));
 
         let vp = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(VIEWPORT))
@@ -2016,21 +2518,38 @@ impl eframe::App for UmberApp {
         }
         self.view_bar(&ctx, vp);
         if self.mesh.is_none() {
-            self.welcome(&ctx, vp, now);
+            self.welcome(&ctx, vp);
         } else {
             self.workspace_placard(&ctx, vp);
             self.unwrap_card(&ctx, vp);
         }
         self.toast(&ctx, vp, now);
+        self.save_changes_modal(&ctx);
 
         // Anything the panels changed becomes one undo step once the pointer lets go.
         if !ctx.input(|i| i.pointer.any_down()) {
             self.history.record_stack_changes(&mut self.sets);
         }
+        self.autosave(&ctx);
+        self.update_title(&ctx);
     }
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// Take a save job off its slot once it has finished.
+fn finished(slot: &mut Option<SaveJob>, ctx: &egui::Context) -> Option<(SaveJob, anyhow::Result<()>)> {
+    let job = slot.as_ref()?;
+    let outcome = match job.result.try_recv() {
+        Ok(outcome) => outcome,
+        Err(mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return None;
+        }
+        Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("the save stopped unexpectedly")),
+    };
+    slot.take().map(|job| (job, outcome))
+}
 
 fn slider_with_value(
     ui: &mut egui::Ui,
@@ -2086,6 +2605,17 @@ fn ago(seconds: f64) -> String {
         s if s < 60.0 => "Just now.".to_owned(),
         s if s < 3600.0 => format!("{} min ago.", (s / 60.0) as u32),
         s => format!("{} h ago.", (s / 3600.0) as u32),
+    }
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+fn when(seconds: f64) -> String {
+    match seconds {
+        s if s < 60.0 => "just now".to_owned(),
+        s if s < 3600.0 => format!("{} min ago", (s / 60.0) as u32),
+        s if s < 86400.0 => format!("{} h ago", (s / 3600.0) as u32),
+        s if s < 172800.0 => "yesterday".to_owned(),
+        s => format!("{} days ago", (s / 86400.0) as u32),
     }
 }
 

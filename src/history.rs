@@ -54,16 +54,33 @@ pub struct Applied {
     pub mesh: bool,
 }
 
+/// Every step carries an id, so the state the work is in has a name: the id of the step on
+/// top of the undo stack. Saving remembers it, and undoing back to it reads as saved again.
 #[derive(Default)]
 pub struct History {
-    undo: Vec<Change>,
-    redo: Vec<Change>,
+    undo: Vec<(u64, Change)>,
+    redo: Vec<(u64, Change)>,
+    /// The state with nothing left to undo.
+    base: u64,
+    next_id: u64,
 }
 
 impl History {
+    /// Forget every step: a new model or project.
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.base = self.fresh_id();
+    }
+
+    fn fresh_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    /// Names the work as it is now. Equal states mean equal work.
+    pub fn state(&self) -> u64 {
+        self.undo.last().map_or(self.base, |(id, _)| *id)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -75,11 +92,14 @@ impl History {
     }
 
     pub fn push(&mut self, change: Change) {
-        self.undo.push(change);
+        let id = self.fresh_id();
+        self.undo.push((id, change));
         self.redo.clear();
-        let mut total: u64 = self.undo.iter().map(Change::bytes).sum();
+        let mut total: u64 = self.undo.iter().map(|(_, c)| c.bytes()).sum();
         while self.undo.len() > 1 && (self.undo.len() > LIMIT || total > PIXEL_BUDGET) {
-            total -= self.undo.remove(0).bytes();
+            let (id, dropped) = self.undo.remove(0);
+            total -= dropped.bytes();
+            self.base = id;
         }
     }
 
@@ -96,16 +116,16 @@ impl History {
 
     /// Returns the texture set the step touched, so the caller can show it.
     pub fn undo(&mut self, sets: &mut [TextureSet], mesh: &mut Mesh, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Applied> {
-        let change = self.undo.pop()?;
+        let (id, change) = self.undo.pop()?;
         let (applied, back) = apply(change, sets, mesh, device, queue);
-        self.redo.push(back);
+        self.redo.push((id, back));
         Some(applied)
     }
 
     pub fn redo(&mut self, sets: &mut [TextureSet], mesh: &mut Mesh, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Applied> {
-        let change = self.redo.pop()?;
+        let (id, change) = self.redo.pop()?;
         let (applied, back) = apply(change, sets, mesh, device, queue);
-        self.undo.push(back);
+        self.undo.push((id, back));
         Some(applied)
     }
 }

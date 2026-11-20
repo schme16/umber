@@ -40,6 +40,17 @@ UMBER_EXPORT_DIR=$PWD/target/godot-test/models scripts/capture.sh scripts/captur
 `scripts/godot-check.gd` loads everything in that project's `res://models` with a headless Godot
 and prints which texture fills each material slot.
 
+Project files need the same for the save dialog, and a recovery folder of their own so a run
+never offers your real unsaved work back (or throws it away). `UMBER_SAVE_PATH` and
+`UMBER_RECOVERY_DIR` preset them. Ctrl+Q stands in for the window's close button, since Xvfb has
+no window manager to send one:
+
+```bash
+UMBER_SAVE_PATH=$PWD/target/proj/cube.umber UMBER_RECOVERY_DIR=$PWD/target/proj/recovery \
+    scripts/capture.sh scripts/captures/project-save.sh
+UMBER_RECOVERY_DIR=$PWD/target/proj/recovery scripts/capture.sh scripts/captures/project-recover.sh
+```
+
 Things Xvfb cannot show (the Huion pen itself, presenting to a real monitor) go to the user as
 a hand-off.
 
@@ -47,6 +58,6 @@ a hand-off.
 
 `cargo test`. The pressure curve and XInput2 fixed-point maths are in `src/pen.rs`; unwrap,
 the projections, repack and the UV health numbers in `src/unwrap.rs`; paint transfer to new UVs in `src/texset.rs`;
-FBX import in `src/mesh.rs`; export naming, `res://` paths, map readback and a GLB round trip in
+FBX import in `src/mesh.rs`; a project save and reopen that must come back bit for bit in `src/project.rs`; export naming, `res://` paths, map readback and a GLB round trip in
 `src/export.rs`. `UMBER_TEST_MODELS=dir cargo test opens_every -- --nocapture` opens every model
 in a folder and prints what came in.

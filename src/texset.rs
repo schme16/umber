@@ -142,8 +142,17 @@ impl PaintPixels {
         }
     }
 
+    /// A layer with these pixels: colour, material and coverage, tightly packed at [`SIZE`].
+    pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, data: [&[u8]; 3]) -> Self {
+        let pixels = Self::new(device);
+        for ((tex, bpp), bytes) in pixels.textures().into_iter().zip(data) {
+            write_full(queue, tex, bytes, bpp);
+        }
+        pixels
+    }
+
     /// The three textures with their bytes per texel, in a fixed order.
-    fn textures(&self) -> [(&wgpu::Texture, u32); 3] {
+    pub fn textures(&self) -> [(&wgpu::Texture, u32); 3] {
         [(&self.color, 4), (&self.mat, 8), (&self.cov, 4)]
     }
 
@@ -163,6 +172,13 @@ impl Mask {
     pub fn white(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let texture = layer_texture(device, "layer mask", MASK_FORMAT, SIZE);
         write_full(queue, &texture, &vec![255u8; (SIZE * SIZE * 4) as usize], 4);
+        Self { view: texture.create_view(&Default::default()), texture }
+    }
+
+    /// A mask from RGBA8 texels at [`SIZE`] (only red counts).
+    pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, rgba: &[u8]) -> Self {
+        let texture = layer_texture(device, "layer mask", MASK_FORMAT, SIZE);
+        write_full(queue, &texture, rgba, 4);
         Self { view: texture.create_view(&Default::default()), texture }
     }
 }
@@ -533,8 +549,14 @@ impl Compositor {
             layers.push(layer);
         }
         let selected = layers.len() - 1;
+        self.set_with(device, material.name.clone(), layers, selected)
+    }
+
+    /// A texture set with these layers (bottom first), as a project file reopens it.
+    pub fn set_with(&self, device: &wgpu::Device, name: String, layers: Vec<Layer>, selected: usize) -> TextureSet {
+        let selected = selected.min(layers.len().saturating_sub(1));
         TextureSet {
-            name: material.name.clone(),
+            name,
             committed: layers.clone(),
             layers,
             selected,
