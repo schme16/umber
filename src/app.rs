@@ -3102,7 +3102,7 @@ impl UmberApp {
                         );
                         widgets::vdivider(ui, 18.0);
                         let tip = "Camera: how dragging turns the model and how scrolling zooms";
-                        let b = widgets::icon_button(ui, icons::ROTATE_3D, self.camera_open, 36.0, tip);
+                        let b = widgets::icon_label_button(ui, icons::ROTATE_3D, "Camera", self.camera_open, 36.0, tip);
                         if b.clicked() {
                             self.camera_open = !self.camera_open;
                         }
