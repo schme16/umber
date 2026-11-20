@@ -83,6 +83,11 @@ impl History {
         self.undo.last().map_or(self.base, |(id, _)| *id)
     }
 
+    /// GPU memory the undo and redo steps keep alive, roughly.
+    pub fn bytes(&self) -> u64 {
+        self.undo.iter().chain(&self.redo).map(|(_, c)| c.bytes()).sum()
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

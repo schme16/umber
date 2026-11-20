@@ -379,6 +379,8 @@ struct Prefs {
     tips_off: bool,
     /// Image files the brush has painted with, newest first.
     recent_textures: Vec<PathBuf>,
+    /// The F3 stats overlay was open when Umber last closed.
+    stats_open: bool,
 }
 
 /// Remembers which tips have been seen, in `$XDG_CONFIG_HOME/umber/prefs.json`.
@@ -443,7 +445,20 @@ impl Tips {
     }
 
     pub fn reset(&mut self) {
-        self.prefs = Prefs { recent_textures: std::mem::take(&mut self.prefs.recent_textures), ..Prefs::default() };
+        self.prefs = Prefs {
+            recent_textures: std::mem::take(&mut self.prefs.recent_textures),
+            stats_open: self.prefs.stats_open,
+            ..Prefs::default()
+        };
+        self.write();
+    }
+
+    pub fn stats_open(&self) -> bool {
+        self.prefs.stats_open
+    }
+
+    pub fn set_stats_open(&mut self, open: bool) {
+        self.prefs.stats_open = open;
         self.write();
     }
 

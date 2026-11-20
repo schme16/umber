@@ -13,10 +13,27 @@ mod mesh;
 mod pen;
 mod project;
 mod renderer;
+mod stats;
 mod texset;
 mod theme;
 mod unwrap;
 mod widgets;
+
+/// eframe's GPU setup, plus timestamp queries where the adapter has them, so the F3 overlay
+/// can time each pass.
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup};
+    let mut options = WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        let base = setup.device_descriptor.clone();
+        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut desc = base(adapter);
+            desc.required_features |= stats::wanted_features(adapter);
+            desc
+        });
+    }
+    options
+}
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("umber=info,wgpu=warn"))
@@ -30,6 +47,7 @@ fn main() -> eframe::Result {
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: wgpu_options(),
         ..Default::default()
     };
 

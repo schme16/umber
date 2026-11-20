@@ -20,6 +20,7 @@ use crate::history::{Applied, Change, History};
 use crate::mesh::{self, Mesh};
 use crate::pen::{PenInput, PressureCurve};
 use crate::project;
+use crate::stats::{self, Stats};
 use crate::renderer::{FrameParams, ViewMode, ViewportRenderer};
 use crate::texset::{self, BlendMode, Channels, Compositor, Fill, Layer, LayerKind, Mask, TextureSet};
 use crate::theme::{self, *};
@@ -377,6 +378,8 @@ pub struct UmberApp {
     /// Space is down: a left drag turns the model.
     space_held: bool,
     tips: help::Tips,
+    /// The F3 overlay and the numbers behind it.
+    stats: Stats,
 }
 
 impl UmberApp {
@@ -385,6 +388,9 @@ impl UmberApp {
         let rs = cc.wgpu_render_state.clone().expect("Umber needs the wgpu renderer");
         let info = rs.adapter.get_info();
         log::info!("GPU: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+        stats::install_gpu_timer(&rs.device, &rs.queue);
+        let tips = help::Tips::load();
+        let stats = Stats::new(tips.stats_open(), &info);
         let renderer = ViewportRenderer::new(&rs);
         let compositor = Compositor::new(&rs.device, &rs.queue);
         let brush_engine = BrushEngine::new(&rs.device, &rs.queue);
@@ -448,7 +454,8 @@ impl UmberApp {
             palette: help::Palette::default(),
             shortcuts_open: false,
             space_held: false,
-            tips: help::Tips::load(),
+            tips,
+            stats,
         };
         project::sweep_recovery_dir();
         if let Some(path) = initial_file {
@@ -951,6 +958,26 @@ impl UmberApp {
         }
     }
 
+    /// Texture memory the open work holds, for the F3 overlay. Layers shared between the
+    /// stack and its undo steps count once, under layers.
+    fn memory(&self) -> stats::Memory {
+        let mut seen = std::collections::HashSet::new();
+        let mut layers = 0;
+        for layer in self.sets.iter().flat_map(|s| &s.layers) {
+            if let Some(p) = &layer.pixels {
+                if seen.insert(Rc::as_ptr(p) as usize) {
+                    layers += p.bytes();
+                }
+            }
+            if let Some(m) = &layer.mask {
+                if seen.insert(Rc::as_ptr(m) as usize) {
+                    layers += stats::texture_bytes(&m.texture);
+                }
+            }
+        }
+        stats::Memory { layers, maps: self.sets.iter().map(TextureSet::map_bytes).sum(), undo: self.history.bytes() }
+    }
+
     fn unsaved(&self) -> bool {
         self.mesh.is_some() && self.history.state() != self.saved_state
     }
@@ -1265,6 +1292,7 @@ impl UmberApp {
             Cmd::BrushTexture => b.use_texture,
             Cmd::ReachAll => b.stroke_reach == Reach::All,
             Cmd::ReachFace => b.stroke_reach == Reach::Face,
+            Cmd::Stats => self.stats.open,
             _ => return None,
         })
     }
@@ -1352,6 +1380,10 @@ impl UmberApp {
             Cmd::Shortcuts => {
                 self.palette.open = false;
                 self.shortcuts_open = !self.shortcuts_open;
+            }
+            Cmd::Stats => {
+                self.stats.toggle();
+                self.tips.set_stats_open(self.stats.open);
             }
             Cmd::ResetTips => {
                 self.tips.reset();
@@ -1564,6 +1596,7 @@ impl UmberApp {
         }
         let cam = brush::View { view_proj: proj * view, eye: self.camera.eye(), size };
         let has_uvs = self.mesh.as_ref().is_some_and(|m| m.has_uvs);
+        let painting = std::time::Instant::now();
         if in_paint && pressed && !hand && response.hovered() && self.stroke.is_none() && !has_uvs {
             self.no_uv_offer_dismissed = false;
             self.toast = Some(("This model has no UVs yet, so there's nowhere for paint to go. Auto-unwrap it first.".into(), self.now));
@@ -1584,10 +1617,13 @@ impl UmberApp {
         } else if self.stroke.is_some() {
             self.stroke_frame(&moves, rect, ppp, &cam);
         }
+        self.stats.cpu("Painting", painting.elapsed());
 
+        let compositing = std::time::Instant::now();
         for set in &mut self.sets {
             self.compositor.update(&self.rs.device, &self.rs.queue, set);
         }
+        self.stats.cpu("Compositing layers", compositing.elapsed());
         let params = FrameParams {
             view,
             proj,
@@ -1596,7 +1632,10 @@ impl UmberApp {
             view_mode: if self.workspace == Workspace::Uv { ViewMode::UvCheck } else { self.view_mode },
             exposure: self.exposure,
         };
+        let drawing = std::time::Instant::now();
         let tex = self.renderer.render(&self.rs, size, &params);
+        self.stats.cpu("Drawing the model", drawing.elapsed());
+        self.stats.draws = self.renderer.draw_counts();
         ui.painter().image(tex, rect, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
 
         // Brush cursor: outer ring is the full size, inner ring shows the hardness falloff.
@@ -3030,6 +3069,7 @@ impl eframe::App for UmberApp {
                 self.parent = Some(Parent { window: w.as_raw(), display: d.as_raw() });
             }
         }
+        self.stats.begin_frame(frame.info().cpu_usage);
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         self.now = now;
@@ -3070,6 +3110,7 @@ impl eframe::App for UmberApp {
             self.workspace_placard(&ctx, vp);
             self.unwrap_card(&ctx, vp);
         }
+        self.stats.show(&ctx, vp);
         self.tips(&ctx, vp);
         self.toast(&ctx, vp, now);
         let chosen = {
@@ -3093,6 +3134,10 @@ impl eframe::App for UmberApp {
         }
         self.autosave(&ctx);
         self.update_title(&ctx);
+        if self.stats.open {
+            self.stats.memory = self.memory();
+        }
+        self.stats.end_frame(&self.rs.device, &self.rs.queue);
     }
 }
 

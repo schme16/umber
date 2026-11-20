@@ -436,6 +436,7 @@ impl BrushEngine {
                 queue.write_buffer(&self.dabs, 0, bytemuck::cast_slice(chunk));
             }
             let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("brush") });
+            let timer = crate::stats::timestamps(if paint.mode == Mode::Fill { "Fill" } else { "Brush dabs" });
             {
                 let attachments: Vec<_> = active
                     .views
@@ -452,6 +453,7 @@ impl BrushEngine {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("brush"),
                     color_attachments: &attachments,
+                    timestamp_writes: timer.as_ref().map(crate::stats::Slot::render),
                     ..Default::default()
                 });
                 pass.set_pipeline(if active.mask { &self.mask_pipeline } else { &self.layer_pipeline });
@@ -535,6 +537,7 @@ impl BrushEngine {
             },
         };
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("brush distance") });
+        let timer = crate::stats::timestamps("Brush depth");
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("brush distance"),
@@ -552,6 +555,7 @@ impl BrushEngine {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: timer.as_ref().map(crate::stats::Slot::render),
                 ..Default::default()
             });
             pass.set_pipeline(&self.dist_pipeline);

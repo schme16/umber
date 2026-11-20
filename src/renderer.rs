@@ -231,6 +231,14 @@ impl ViewportRenderer {
         Some(crate::brush::MeshDraw { vertices: &mesh.vertex, indices: &mesh.index, ranges, only: None })
     }
 
+    /// What a frame of the viewport draws.
+    pub fn draw_counts(&self) -> crate::stats::DrawCounts {
+        let Some(mesh) = &self.mesh else { return Default::default() };
+        let drawn = mesh.submeshes.iter().filter(|(_, m)| mesh.materials.get(*m).is_some());
+        let (triangles, draw_calls) = drawn.fold((0u64, 0u32), |(t, d), (r, _)| (t + (r.len() / 3) as u64, d + 1));
+        crate::stats::DrawCounts { triangles, draw_calls }
+    }
+
     /// Render one frame at `size` physical pixels and return the egui texture showing it.
     pub fn render(&mut self, rs: &egui_wgpu::RenderState, size: [u32; 2], p: &FrameParams) -> egui::TextureId {
         let size = [size[0].clamp(1, 8192), size[1].clamp(1, 8192)];
@@ -250,6 +258,7 @@ impl ViewportRenderer {
         rs.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
 
         let mut encoder = rs.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("viewport") });
+        let timer = crate::stats::timestamps("Drawing the model");
         {
             let bg = srgb_to_linear(crate::theme::VIEWPORT);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -268,6 +277,7 @@ impl ViewportRenderer {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: timer.as_ref().map(crate::stats::Slot::render),
                 ..Default::default()
             });
             if let Some(mesh) = &self.mesh {

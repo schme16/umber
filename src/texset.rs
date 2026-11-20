@@ -126,6 +126,11 @@ pub struct PaintPixels {
 }
 
 impl PaintPixels {
+    /// GPU memory the layer's textures take.
+    pub fn bytes(&self) -> u64 {
+        [&self.color, &self.mat, &self.cov].into_iter().map(crate::stats::texture_bytes).sum()
+    }
+
     /// A fully transparent layer.
     pub fn new(device: &wgpu::Device) -> Self {
         let make = |label, format| layer_texture(device, label, format, SIZE);
@@ -317,6 +322,12 @@ struct Outputs {
 }
 
 impl TextureSet {
+    /// GPU memory the composited maps take, with their mips.
+    pub fn map_bytes(&self) -> u64 {
+        let o = &self.outputs;
+        [&o.color, &o.mat, &o.normal].into_iter().map(crate::stats::texture_bytes).sum()
+    }
+
     pub fn selected_layer(&self) -> Option<&Layer> {
         self.layers.get(self.selected)
     }
@@ -869,8 +880,12 @@ impl Compositor {
 
         let groups_of = |n: u32| n.div_ceil(8);
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("composite") });
+        let timer = crate::stats::timestamps("Compositing layers");
         {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("composite"), timestamp_writes: None });
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("composite"),
+                timestamp_writes: timer.as_ref().map(crate::stats::Slot::compute),
+            });
             pass.set_pipeline(&self.blend);
             for g in &groups {
                 pass.set_bind_group(0, g, &[]);
