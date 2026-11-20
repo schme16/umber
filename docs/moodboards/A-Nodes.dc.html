@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction A: material graph</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#f0a646}a:hover{color:#ffc27a}
+.panel{background:#1d1e22;border:1px solid #2e3035;border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#9a9ca3;font-weight:500}
+.num{font-family:'JetBrains Mono',monospace;font-size:12px;color:#ecebe8}
+.chip{height:30px;padding:0 10px;border-radius:8px;border:1px solid #34363c;background:transparent;color:#c9cad0;font:500 12.5px Inter,sans-serif;display:flex;align-items:center;gap:6px;cursor:pointer}
+.chip.on{background:#2f2a22;border-color:#7a5a2c;color:#f6c886}
+.seg{display:flex;background:#1b1c20;border:1px solid #2a2c31;border-radius:10px;padding:3px;gap:2px}
+.seg button{height:30px;padding:0 14px;border:0;border-radius:7px;background:transparent;color:#a3a5ab;font:500 13px Inter,sans-serif;cursor:pointer}
+.seg button.on{background:#2d2f35;color:#f3f2ef}
+.node{position:absolute;width:176px;background:#222328;border:1px solid #393b42;border-radius:12px;box-shadow:0 8px 20px rgba(0,0,0,.4)}
+.node.sel{border-color:#f0a646;box-shadow:0 0 0 1px #f0a646,0 8px 20px rgba(0,0,0,.4)}
+.nh{height:34px;display:flex;align-items:center;gap:8px;padding:0 12px;font-size:13px;font-weight:500;border-bottom:1px solid #2e3035}
+.cd{width:8px;height:8px;border-radius:4px}
+.pv{margin:8px;height:80px;border-radius:6px}
+.pr{height:26px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:12px;color:#b4b6bc;position:relative}
+.pi,.po{position:absolute;top:8px;width:10px;height:10px;border-radius:5px;background:#8a8d94;border:2px solid #222328}
+.pi{left:-7px}.po{right:-7px}
+.cat{display:flex;align-items:center;justify-content:space-between;height:36px;padding:0 10px;border-radius:8px;font-size:13px;color:#c9cad0}
+.cat.on{background:#2a2b31;color:#f3f2ef}
+.track{position:relative;height:4px;border-radius:2px;background:#34363c}
+.fill{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:#f0a646}
+.knob{position:absolute;top:-6px;width:16px;height:16px;border-radius:8px;background:#ecebe8;margin-left:-8px}
+</style>
+</helmet>
+<div style="position: relative; width: 1440px; height: 900px; overflow: hidden; background: #0f1012; font-family: Inter, system-ui, sans-serif; color: #ecebe8">
+
+  <header style="position: absolute; top: 0; left: 0; right: 0; height: 52px; display: flex; align-items: center; padding: 0 16px; gap: 16px; background: #131417; border-bottom: 1px solid #24262a; box-sizing: border-box">
+    <div style="display: flex; align-items: center; gap: 10px; flex: 1">
+      <div style="width: 26px; height: 26px; border-radius: 7px; background: #f0a646; display: flex; align-items: center; justify-content: center"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" style="fill: none; stroke: #1a1206; stroke-width: 2.2; stroke-linecap: round"><path d="M6 5v8a6 6 0 0 0 12 0V5"></path></svg></div>
+      <span style="font-weight: 600; font-size: 14px">UV Paint</span>
+      <span style="width: 1px; height: 18px; background: #2e3035"></span>
+      <span style="font-size: 13px; color: #c9cad0">Weathered oak.mat</span>
+    </div>
+    <nav class="seg" aria-label="Workspaces"><button>Paint</button><button>UV</button><button class="on">Materials</button><button>Export</button></nav>
+    <div style="flex: 1; display: flex; justify-content: flex-end"><button style="height: 34px; padding: 0 16px; border: 0; border-radius: 9px; background: #f0a646; color: #1a1206; font: 600 13px Inter, sans-serif; cursor: pointer">Use in Paint</button></div>
+  </header>
+
+  <main style="position: absolute; top: 52px; left: 0; right: 0; bottom: 0; background-color: #16171a; background-image: radial-gradient(circle, #2c2e33 1px, transparent 1.5px); background-size: 24px 24px">
+
+    <svg width="1440" height="848" aria-hidden="true" style="position: absolute; left: 0; top: 0">
+      <g fill="none" stroke-width="2.5">
+        <path d="M448 239C508 239 436 403 496 403" stroke="#8a8d94"></path>
+        <path d="M448 583C508 583 436 429 496 429" stroke="#8a8d94"></path>
+        <path d="M672 403C732 403 660 239 720 239" stroke="#8a8d94"></path>
+        <path d="M672 403C732 403 660 523 720 523" stroke="#8a8d94"></path>
+        <path d="M672 403C732 403 660 783 720 783" stroke="#8a8d94"></path>
+        <path d="M896 239C956 239 892 393 952 393" stroke="#f0a646"></path>
+        <path d="M896 523C956 523 892 419 952 419" stroke="#8a8d94"></path>
+        <path d="M896 783C956 783 892 471 952 471" stroke="#9aa5ff"></path>
+      </g>
+    </svg>
+
+    <div class="node" style="left: 272px; top: 96px"><div class="nh"><span class="cd" style="background: #f0a646"></span>Planks</div><div class="pv" style="background: repeating-linear-gradient(0deg, #cfcfcf 0 17px, #1e1e1e 17px 20px)"></div><div class="pr"><span></span><span>Height</span><span class="po"></span></div><div class="pr"><span></span><span>Mask</span><span class="po"></span></div><div style="height: 6px"></div></div>
+
+    <div class="node" style="left: 272px; top: 440px"><div class="nh"><span class="cd" style="background: #5fc4c4"></span>Perlin noise</div><div class="pv" style="background-color: #555; background-image: radial-gradient(circle at 20% 30%, #bbb 0, transparent 30%), radial-gradient(circle at 70% 60%, #999 0, transparent 35%), radial-gradient(circle at 45% 85%, #222 0, transparent 30%)"></div><div class="pr"><span></span><span>Noise</span><span class="po"></span></div><div style="height: 6px"></div></div>
+
+    <div class="node sel" style="left: 496px; top: 260px"><div class="nh"><span class="cd" style="background: #a3a5ab"></span>Warp</div><div class="pv" style="background: repeating-linear-gradient(6deg, #cfcfcf 0 15px, #1e1e1e 15px 18px, #b8b8b8 18px 22px)"></div><div class="pr"><span class="pi"></span><span>Image</span><span>Result</span><span class="po"></span></div><div class="pr"><span class="pi"></span><span>Warp by</span><span></span></div><div style="height: 6px"></div></div>
+
+    <div class="node" style="left: 720px; top: 96px"><div class="nh"><span class="cd" style="background: #e58fb4"></span>Gradient map</div><div class="pv" style="background: repeating-linear-gradient(6deg, #a2733f 0 14px, #5a3c20 14px 17px, #c49461 17px 24px)"></div><div class="pr"><span class="pi"></span><span>Height</span><span>Colour</span><span class="po" style="background: #f0a646"></span></div><div style="height: 6px"></div></div>
+
+    <div class="node" style="left: 720px; top: 380px"><div class="nh"><span class="cd" style="background: #a3a5ab"></span>Levels</div><div class="pv" style="background: repeating-linear-gradient(6deg, #e6e6e6 0 15px, #000 15px 18px, #9a9a9a 18px 22px)"></div><div class="pr"><span class="pi"></span><span>In</span><span>Out</span><span class="po"></span></div><div style="height: 6px"></div></div>
+
+    <div class="node" style="left: 720px; top: 640px"><div class="nh"><span class="cd" style="background: #9aa5ff"></span>Height to normal</div><div class="pv" style="background: repeating-linear-gradient(6deg, #8a8cff 0 14px, #5f6bd9 14px 17px, #b3b0ff 17px 22px)"></div><div class="pr"><span class="pi"></span><span>Height</span><span>Normal</span><span class="po" style="background: #9aa5ff"></span></div><div style="height: 6px"></div></div>
+
+    <div class="node" style="left: 952px; top: 250px; width: 172px"><div class="nh"><span class="cd" style="background: #ecebe8"></span>Material output</div><div class="pv" style="background: #121316; display: flex; align-items: center; justify-content: center"><span style="width: 70px; height: 70px; border-radius: 35px; background: radial-gradient(circle at 35% 30%, #e0b27c, #8f6438 55%, #2a1a0c)"></span></div>
+      <div class="pr"><span class="pi" style="background: #f0a646"></span><span>Base colour</span><span></span></div>
+      <div class="pr"><span class="pi"></span><span>Roughness</span><span></span></div>
+      <div class="pr"><span class="pi" style="background: #3a3c42"></span><span style="color: #8a8c93">Metallic</span><span></span></div>
+      <div class="pr"><span class="pi" style="background: #9aa5ff"></span><span>Normal</span><span></span></div>
+      <div class="pr"><span class="pi" style="background: #3a3c42"></span><span style="color: #8a8c93">Height</span><span></span></div>
+      <div class="pr"><span class="pi" style="background: #3a3c42"></span><span style="color: #8a8c93">AO</span><span></span></div>
+      <div style="height: 6px"></div>
+    </div>
+
+    <aside class="panel" style="position: absolute; left: 16px; top: 16px; bottom: 16px; width: 232px; padding: 12px; box-sizing: border-box; display: flex; flex-direction: column; gap: 6px" aria-label="Node library">
+      <label style="display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-radius: 9px; background: #141518; border: 1px solid #2e3035; font-size: 13px; color: #9a9ca3">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" style="fill: none; stroke: currentColor; stroke-width: 1.8"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4-4"></path></svg>
+        <input type="text" placeholder="Add a node…" aria-label="Search nodes" style="flex: 1; min-width: 0; border: 0; background: transparent; color: #ecebe8; font: 13px Inter, sans-serif; outline: none">
+        <span class="num" style="color: #9a9ca3">Tab</span>
+      </label>
+      <div style="height: 8px"></div>
+      <div class="cat on"><span>Patterns</span><span class="num" style="color: #9a9ca3">24</span></div>
+      <div class="cat"><span>Noise</span><span class="num" style="color: #9a9ca3">18</span></div>
+      <div class="cat"><span>Filters</span><span class="num" style="color: #9a9ca3">31</span></div>
+      <div class="cat"><span>Masks from model</span><span class="num" style="color: #9a9ca3">9</span></div>
+      <div class="cat"><span>Colour</span><span class="num" style="color: #9a9ca3">12</span></div>
+      <div class="cat"><span>Math</span><span class="num" style="color: #9a9ca3">20</span></div>
+      <div class="cat"><span>Your nodes</span><span class="num" style="color: #9a9ca3">3</span></div>
+      <div style="height: 1px; background: #2a2c31; margin: 8px 0"></div>
+      <span class="lbl" style="padding: 0 4px 6px">Patterns</span>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
+        <div style="display: flex; flex-direction: column; gap: 4px; align-items: center"><span style="width: 56px; height: 56px; border-radius: 8px; background: repeating-linear-gradient(0deg, #cfcfcf 0 10px, #1e1e1e 10px 12px)"></span><span style="font-size: 11.5px; color: #c9cad0">Planks</span></div>
+        <div style="display: flex; flex-direction: column; gap: 4px; align-items: center"><span style="width: 56px; height: 56px; border-radius: 8px; background-color: #1e1e1e; background-image: linear-gradient(#cfcfcf 0 0), linear-gradient(#cfcfcf 0 0); background-size: 24px 12px; background-position: 2px 2px, 14px 16px"></span><span style="font-size: 11.5px; color: #c9cad0">Bricks</span></div>
+        <div style="display: flex; flex-direction: column; gap: 4px; align-items: center"><span style="width: 56px; height: 56px; border-radius: 8px; background-color: #cfcfcf; background-image: linear-gradient(90deg, #1e1e1e 2px, transparent 2px), linear-gradient(#1e1e1e 2px, transparent 2px); background-size: 14px 14px"></span><span style="font-size: 11.5px; color: #c9cad0">Tiles</span></div>
+        <div style="display: flex; flex-direction: column; gap: 4px; align-items: center"><span style="width: 56px; height: 56px; border-radius: 8px; background-color: #1e1e1e; background-image: radial-gradient(circle, #cfcfcf 4px, transparent 5px); background-size: 14px 14px"></span><span style="font-size: 11.5px; color: #c9cad0">Rivets</span></div>
+        <div style="display: flex; flex-direction: column; gap: 4px; align-items: center"><span style="width: 56px; height: 56px; border-radius: 8px; background: repeating-linear-gradient(45deg, #cfcfcf 0 5px, #1e1e1e 5px 10px)"></span><span style="font-size: 11.5px; color: #c9cad0">Tread</span></div>
+        <div style="display: flex; flex-direction: column; gap: 4px; align-items: center"><span style="width: 56px; height: 56px; border-radius: 8px; background: repeating-radial-gradient(circle at 50% 50%, #cfcfcf 0 3px, #1e1e1e 3px 7px)"></span><span style="font-size: 11.5px; color: #c9cad0">Rings</span></div>
+      </div>
+    </aside>
+
+    <aside class="panel" style="position: absolute; right: 16px; top: 16px; bottom: 16px; width: 284px; padding: 14px; box-sizing: border-box; display: flex; flex-direction: column; gap: 14px" aria-label="Preview and properties">
+      <div style="height: 200px; border-radius: 10px; background: #121316; display: flex; align-items: center; justify-content: center"><span style="width: 150px; height: 150px; border-radius: 75px; background: radial-gradient(circle at 35% 30%, #e0b27c, #8f6438 55%, #2a1a0c)"></span></div>
+      <div class="seg" role="group" aria-label="Preview shape" style="align-self: flex-start"><button class="on">Sphere</button><button>Cube</button><button>Your model</button></div>
+      <div style="height: 1px; background: #2a2c31"></div>
+      <span class="lbl">Warp</span>
+      <div style="display: flex; flex-direction: column; gap: 10px"><div style="display: flex; justify-content: space-between"><span style="font-size: 13px; color: #c9cad0">Strength</span><span class="num">0.35</span></div><div class="track"><div class="fill" style="width: 35%"></div><div class="knob" style="left: 35%"></div></div></div>
+      <div style="display: flex; flex-direction: column; gap: 10px"><div style="display: flex; justify-content: space-between"><span style="font-size: 13px; color: #c9cad0">Scale</span><span class="num">4</span></div><div class="track"><div class="fill" style="width: 25%"></div><div class="knob" style="left: 25%"></div></div></div>
+      <div style="display: flex; align-items: center; justify-content: space-between"><span style="font-size: 13px; color: #c9cad0">Seed</span><div style="display: flex; gap: 6px; align-items: center"><span class="num">1207</span><button class="chip">Shuffle</button></div></div>
+      <div style="height: 1px; background: #2a2c31"></div>
+      <span class="lbl">Godot export</span>
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <button class="chip on" style="justify-content: space-between">Baked maps + StandardMaterial3D<span class="num" style="color: #f6c886">.tres</span></button>
+        <button class="chip" style="justify-content: space-between">Live procedural shader<span class="num" style="color: #9a9ca3">.gdshader</span></button>
+      </div>
+    </aside>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

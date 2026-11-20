@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction A: UV workspace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#f0a646}a:hover{color:#ffc27a}
+.panel{background:#1d1e22;border:1px solid #2e3035;border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.ib{width:44px;height:44px;border:0;border-radius:10px;background:transparent;color:#b4b6bc;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.ib svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.ib.on{background:#f0a646;color:#1a1206}
+.lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#9a9ca3;font-weight:500}
+.num{font-family:'JetBrains Mono',monospace;font-size:12px;color:#ecebe8}
+.chip{height:32px;padding:0 12px;border-radius:8px;border:1px solid #34363c;background:transparent;color:#c9cad0;font:500 12.5px Inter,sans-serif;display:flex;align-items:center;gap:6px;cursor:pointer}
+.seg{display:flex;background:#1b1c20;border:1px solid #2a2c31;border-radius:10px;padding:3px;gap:2px}
+.seg button{height:30px;padding:0 14px;border:0;border-radius:7px;background:transparent;color:#a3a5ab;font:500 13px Inter,sans-serif;cursor:pointer}
+.seg button.on{background:#2d2f35;color:#f3f2ef}
+.stat{display:flex;align-items:center;gap:10px;font-size:13px;color:#c9cad0}
+.dot{width:8px;height:8px;border-radius:4px;flex:none}
+</style>
+</helmet>
+<div style="position: relative; width: 1440px; height: 900px; overflow: hidden; background: #0f1012; font-family: Inter, system-ui, sans-serif; color: #ecebe8">
+
+  <header style="position: absolute; top: 0; left: 0; right: 0; height: 52px; display: flex; align-items: center; padding: 0 16px; gap: 16px; background: #131417; border-bottom: 1px solid #24262a; box-sizing: border-box">
+    <div style="display: flex; align-items: center; gap: 10px; flex: 1">
+      <div style="width: 26px; height: 26px; border-radius: 7px; background: #f0a646; display: flex; align-items: center; justify-content: center"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" style="fill: none; stroke: #1a1206; stroke-width: 2.2; stroke-linecap: round"><path d="M6 5v8a6 6 0 0 0 12 0V5"></path></svg></div>
+      <span style="font-weight: 600; font-size: 14px">UV Paint</span>
+      <span style="width: 1px; height: 18px; background: #2e3035"></span>
+      <span style="font-size: 13px; color: #c9cad0">old_crate.glb</span>
+    </div>
+    <nav class="seg" aria-label="Workspaces"><button>Paint</button><button class="on">UV</button><button>Materials</button><button>Export</button></nav>
+    <div style="flex: 1"></div>
+  </header>
+
+  <main style="position: absolute; top: 52px; left: 0; width: 720px; bottom: 0; background-color: #1a1b1e; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 48px 48px">
+    <svg viewBox="0 0 600 620" width="460" height="475" role="img" aria-label="Crate with a checker preview, seams marked in orange and the selected face outlined" style="position: absolute; left: 150px; top: 170px">
+      <defs>
+        <pattern id="ck" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="2" height="2" fill="#d9d6cf"></rect><rect width="1" height="1" fill="#a9a59d"></rect><rect x="1" y="1" width="1" height="1" fill="#a9a59d"></rect></pattern>
+        <pattern id="ckL" href="#ck" patternTransform="matrix(36.67 21.17 0 42.33 80 167)"></pattern>
+        <pattern id="ckR" href="#ck" patternTransform="matrix(36.67 -21.17 0 42.33 300 294)"></pattern>
+        <pattern id="ckT" href="#ck" patternTransform="matrix(36.67 -21.17 36.67 21.17 80 167)"></pattern>
+      </defs>
+      <ellipse cx="300" cy="575" rx="250" ry="38" fill="#000" opacity=".35"></ellipse>
+      <polygon points="300,40 520,167 300,294 80,167" fill="url(#ckT)"></polygon>
+      <polygon points="80,167 300,294 300,548 80,421" fill="url(#ckL)"></polygon>
+      <polygon points="80,167 300,294 300,548 80,421" fill="#000" opacity=".12"></polygon>
+      <polygon points="300,294 520,167 520,421 300,548" fill="url(#ckR)"></polygon>
+      <polygon points="300,294 520,167 520,421 300,548" fill="#000" opacity=".3"></polygon>
+      <polygon points="80,167 300,294 300,548 80,421" fill="#f0a646" opacity=".18"></polygon>
+      <polygon points="84,174 296,296 296,541 84,419" fill="none" stroke="#f0a646" stroke-width="3"></polygon>
+      <g fill="none" stroke="#ff5f3a" stroke-width="5" stroke-linecap="round"><path d="M80 167L300 40"></path><path d="M300 294V548"></path><path d="M520 167V421"></path></g>
+      <g fill="none" stroke="#2a2c30" stroke-width="2"><path d="M300 40L520 167L300 294L80 167M80 167V421L300 548L520 421"></path></g>
+    </svg>
+
+    <div class="panel" style="position: absolute; left: 16px; top: 84px; width: 60px; padding: 8px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; gap: 4px" role="toolbar" aria-label="UV tools">
+      <button class="ib on" aria-label="Select faces"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" opacity=".5"></path></svg></button>
+      <button class="ib" aria-label="Select edges"><svg viewBox="0 0 24 24"><path d="M5 19L19 5"></path><circle cx="5" cy="19" r="2"></circle><circle cx="19" cy="5" r="2"></circle></svg></button>
+      <button class="ib" aria-label="Mark seam"><svg viewBox="0 0 24 24"><path d="M4 20L20 4" stroke-dasharray="3 3"></path><path d="M14 4h6v6"></path></svg></button>
+      <button class="ib" aria-label="Clear seam"><svg viewBox="0 0 24 24"><path d="M4 20L20 4" stroke-dasharray="3 3"></path><path d="M14 14l6 6M20 14l-6 6"></path></svg></button>
+      <button class="ib" aria-label="Straighten island"><svg viewBox="0 0 24 24"><path d="M4 18h16M4 12c4-4 8 4 16 0" opacity=".6"></path></svg></button>
+      <button class="ib" aria-label="Pin"><svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3H7l3-3z"></path><path d="M12 13v8"></path></svg></button>
+    </div>
+
+    <div class="panel" style="position: absolute; left: 16px; bottom: 16px; width: 280px; padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px">
+      <span class="lbl">UV health</span>
+      <div class="stat"><span class="dot" style="background: #7bd389"></span><span style="flex: 1">Stretch</span><span class="num">2.1% · good</span></div>
+      <div class="stat"><span class="dot" style="background: #7bd389"></span><span style="flex: 1">Overlaps</span><span class="num">0</span></div>
+      <div class="stat"><span class="dot" style="background: #f0a646"></span><span style="flex: 1">Space used</span><span class="num">71%</span></div>
+      <div class="stat"><span class="dot" style="background: #7bd389"></span><span style="flex: 1">Texel density</span><span class="num">even</span></div>
+      <button class="chip" style="justify-content: center">Show stretch heatmap</button>
+    </div>
+  </main>
+
+  <section style="position: absolute; top: 68px; left: 728px; right: 16px; bottom: 16px; border-radius: 14px; border: 1px solid #2e3035; background-color: #141518; background-image: linear-gradient(45deg, #18191c 25%, transparent 25%, transparent 75%, #18191c 75%), linear-gradient(45deg, #18191c 25%, transparent 25%, transparent 75%, #18191c 75%); background-size: 32px 32px; background-position: 0 0, 16px 16px; overflow: hidden" aria-label="UV editor">
+    <div style="position: absolute; left: 16px; top: 16px; right: 16px; display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-radius: 12px; background: #2a2418; border: 1px solid #5a4425">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" style="fill: none; stroke: #f6c886; stroke-width: 1.8; stroke-linecap: round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v5M12 16v.5"></path></svg>
+      <span style="flex: 1; font-size: 13px; color: #f3e2c6">This model came with UVs. 2 islands overlapped; they were moved apart.</span>
+      <button class="chip" style="border-color: #6b5230; color: #f6c886">Undo fix</button>
+      <button class="chip" style="border-color: #6b5230; color: #f6c886">Re-unwrap all</button>
+    </div>
+
+    <svg viewBox="-20 -20 560 560" width="560" height="560" role="img" aria-label="UV islands in the 0 to 1 square" style="position: absolute; left: 50%; top: 92px; transform: translateX(-50%)">
+      <rect x="0" y="0" width="520" height="520" fill="none" stroke="#4a4c52" stroke-dasharray="6 6"></rect>
+      <g fill="#2b2d33" stroke="#7e828c" stroke-width="1.5">
+        <rect x="14" y="14" width="160" height="160"></rect>
+        <rect x="346" y="14" width="160" height="160"></rect>
+        <rect x="14" y="188" width="160" height="160"></rect>
+        <rect x="188" y="188" width="160" height="160"></rect>
+        <rect x="346" y="188" width="160" height="160"></rect>
+        <rect x="14" y="362" width="300" height="34"></rect>
+        <rect x="14" y="408" width="300" height="34"></rect>
+        <rect x="14" y="454" width="300" height="34"></rect>
+        <rect x="330" y="362" width="34" height="144"></rect>
+        <rect x="378" y="362" width="34" height="144"></rect>
+        <rect x="426" y="362" width="34" height="144"></rect>
+        <rect x="472" y="362" width="34" height="144"></rect>
+      </g>
+      <rect x="188" y="14" width="144" height="160" fill="#3a2f1e" stroke="#f0a646" stroke-width="3"></rect>
+      <g fill="none" stroke="#5c5f66" stroke-width="1"><path d="M188 54H332M188 94H332M188 134H332M224 14V174M260 14V174M296 14V174"></path></g>
+      <g fill="#f0a646"><circle cx="188" cy="14" r="5"></circle><circle cx="332" cy="14" r="5"></circle><circle cx="332" cy="174" r="5"></circle><circle cx="188" cy="174" r="5"></circle></g>
+    </svg>
+
+    <div class="panel" style="position: absolute; left: 50%; transform: translateX(-50%); bottom: 16px; padding: 8px; display: flex; align-items: center; gap: 10px; white-space: nowrap">
+      <button style="height: 40px; padding: 0 18px; border: 0; border-radius: 10px; background: #f0a646; color: #1a1206; font: 600 14px Inter, sans-serif; cursor: pointer">Auto-unwrap</button>
+      <div class="seg" role="group" aria-label="Unwrap method"><button class="on">Smart</button><button>From seams</button><button>Lightmap</button></div>
+      <span style="width: 1px; height: 24px; background: #2e3035"></span>
+      <button class="chip">Pack</button>
+      <span class="lbl">Margin</span><span class="num">8 px</span>
+      <button class="chip">Even texel density</button>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

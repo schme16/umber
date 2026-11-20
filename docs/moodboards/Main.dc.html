@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction A, Graphite: Paint workspace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#f0a646}a:hover{color:#ffc27a}
+.panel{background:#1d1e22;border:1px solid #2e3035;border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.ib{width:44px;height:44px;border:0;border-radius:10px;background:transparent;color:#b4b6bc;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.ib svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.ib.on{background:#f0a646;color:#1a1206}
+.sm svg{width:18px;height:18px}
+.lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#9a9ca3;font-weight:500}
+.num{font-family:'JetBrains Mono',monospace;font-size:12px;color:#ecebe8}
+.track{position:relative;height:4px;border-radius:2px;background:#34363c}
+.fill{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:#f0a646}
+.knob{position:absolute;top:-6px;width:16px;height:16px;border-radius:8px;background:#ecebe8;box-shadow:0 1px 4px rgba(0,0,0,.5);margin-left:-8px}
+.chip{height:28px;padding:0 10px;border-radius:8px;border:1px solid #34363c;background:transparent;color:#c9cad0;font:500 12px Inter,sans-serif;display:flex;align-items:center;gap:6px;cursor:pointer}
+.chip.on{background:#2f2a22;border-color:#7a5a2c;color:#f6c886}
+.seg{display:flex;background:#1b1c20;border:1px solid #2a2c31;border-radius:10px;padding:3px;gap:2px}
+.seg button{height:30px;padding:0 14px;border:0;border-radius:7px;background:transparent;color:#a3a5ab;font:500 13px Inter,sans-serif;cursor:pointer}
+.seg button.on{background:#2d2f35;color:#f3f2ef}
+.layer{display:flex;align-items:center;gap:10px;padding:8px;border-radius:10px}
+.layer.sel{background:#2a2b31;box-shadow:inset 0 0 0 1px #4a3d28}
+.thumb{width:38px;height:38px;border-radius:7px;flex:none}
+</style>
+</helmet>
+<div style="position: relative; width: 1440px; height: 900px; overflow: hidden; background: #0f1012; font-family: Inter, system-ui, sans-serif; color: #ecebe8">
+
+  <header style="position: absolute; top: 0; left: 0; right: 0; height: 52px; display: flex; align-items: center; padding: 0 16px; gap: 16px; background: #131417; border-bottom: 1px solid #24262a; box-sizing: border-box">
+    <div style="display: flex; align-items: center; gap: 10px; flex: 1">
+      <div style="width: 26px; height: 26px; border-radius: 7px; background: #f0a646; display: flex; align-items: center; justify-content: center">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" style="fill: none; stroke: #1a1206; stroke-width: 2.2; stroke-linecap: round"><path d="M6 5v8a6 6 0 0 0 12 0V5"></path></svg>
+      </div>
+      <span style="font-weight: 600; font-size: 14px">UV Paint</span>
+      <span style="width: 1px; height: 18px; background: #2e3035"></span>
+      <span style="font-size: 13px; color: #c9cad0">old_crate.glb</span>
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: #f0a646" aria-label="Unsaved changes"></span>
+    </div>
+    <nav class="seg" aria-label="Workspaces">
+      <button class="on">Paint</button><button>UV</button><button>Materials</button><button>Export</button>
+    </nav>
+    <div style="display: flex; align-items: center; gap: 6px; flex: 1; justify-content: flex-end">
+      <button class="ib sm" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"></path><path d="M4 9h10a6 6 0 0 1 0 12h-3"></path></svg></button>
+      <button class="ib sm" aria-label="Redo"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"></path><path d="M20 9H10a6 6 0 0 0 0 12h3"></path></svg></button>
+      <button class="chip"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" style="fill: none; stroke: currentColor; stroke-width: 1.6"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>Studio light</button>
+      <button style="height: 34px; padding: 0 16px; border: 0; border-radius: 9px; background: #f0a646; color: #1a1206; font: 600 13px Inter, sans-serif; cursor: pointer; margin-left: 6px">Export to Godot</button>
+    </div>
+  </header>
+
+  <main style="position: absolute; top: 52px; left: 0; right: 0; bottom: 0; background-color: #1a1b1e; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 48px 48px">
+
+    <svg viewBox="0 0 600 620" width="560" height="580" role="img" aria-label="Wooden crate model being painted" style="position: absolute; left: 380px; top: 150px">
+      <ellipse cx="300" cy="575" rx="250" ry="38" fill="#000" opacity=".35"></ellipse>
+      <polygon points="300,40 520,167 300,294 80,167" fill="#c49461"></polygon>
+      <polygon points="80,167 300,294 300,548 80,421" fill="#a2733f"></polygon>
+      <polygon points="300,294 520,167 520,421 300,548" fill="#7c5530"></polygon>
+      <g stroke="#5a3c20" stroke-width="2.5" opacity=".7">
+        <path d="M135 198.75L355 71.75M190 230.5L410 103.5M245 262.25L465 135.25"></path>
+        <path d="M80 230.5L300 357.5M80 294L300 421M80 357.5L300 484.5"></path>
+        <path d="M300 357.5L520 230.5M300 421L520 294M300 484.5L520 357.5"></path>
+      </g>
+      <path d="M110 320C160 350 205 345 240 390S285 470 270 505" fill="none" stroke="#3b2a1a" stroke-width="30" stroke-linecap="round" opacity=".5"></path>
+      <path d="M95 250C140 262 170 290 210 300" fill="none" stroke="#3b2a1a" stroke-width="18" stroke-linecap="round" opacity=".35"></path>
+      <g fill="none" stroke="#3a3d42" stroke-width="12" stroke-linejoin="round">
+        <polygon points="300,40 520,167 300,294 80,167"></polygon>
+        <path d="M80 167V421L300 548L520 421V167M300 294V548"></path>
+      </g>
+      <g fill="none" stroke="#e8cfa4" stroke-width="3" stroke-linecap="round" opacity=".8">
+        <path d="M92 160L170 115M240 75L290 46M310 46L360 75M450 127L508 160"></path>
+      </g>
+      <circle cx="252" cy="410" r="46" fill="none" stroke="#f4f2ee" stroke-width="1" stroke-dasharray="4 5" opacity=".5"></circle>
+      <circle cx="252" cy="410" r="32" fill="none" stroke="#f4f2ee" stroke-width="1.5"></circle>
+      <circle cx="252" cy="410" r="2.5" fill="#f4f2ee"></circle>
+    </svg>
+
+    <div class="panel" style="position: absolute; left: 16px; top: 16px; width: 60px; padding: 8px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; gap: 4px" role="toolbar" aria-label="Tools">
+      <button class="ib on" aria-label="Brush"><svg viewBox="0 0 24 24"><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L11 16.6 7.4 13z"></path><path d="M7.4 13C5 13 4 15 4 17c0 1.5-1 2.5-2 3 3 0 7-1 7-4.5"></path></svg></button>
+      <button class="ib" aria-label="Eraser"><svg viewBox="0 0 24 24"><path d="M8 20h12"></path><path d="M4.6 14.6l9-9a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L11 18.2H8.2z"></path></svg></button>
+      <button class="ib" aria-label="Smudge"><svg viewBox="0 0 24 24"><path d="M8 14V6a2 2 0 0 1 4 0v5"></path><path d="M12 10a2 2 0 0 1 4 0v2"></path><path d="M16 11a2 2 0 0 1 4 0v3a7 7 0 0 1-7 7h-1a6 6 0 0 1-5-3l-2.5-4a1.7 1.7 0 0 1 3-1.5L8 14"></path></svg></button>
+      <button class="ib" aria-label="Fill"><svg viewBox="0 0 24 24"><path d="M5 11l7-7 7 7-7 7z"></path><path d="M19 15s2 2.5 2 4a2 2 0 0 1-4 0c0-1.5 2-4 2-4z"></path></svg></button>
+      <button class="ib" aria-label="Clone stamp"><svg viewBox="0 0 24 24"><path d="M9 4h6v5l3 3H6l3-3z"></path><path d="M5 15h14v3H5zM7 21h10"></path></svg></button>
+      <button class="ib" aria-label="Decal projection"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M4 15l4-4 4 4 3-3 5 5"></path></svg></button>
+      <button class="ib" aria-label="Mask"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" stroke-dasharray="3 3"></circle><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none" opacity=".35"></path></svg></button>
+      <button class="ib" aria-label="Colour picker"><svg viewBox="0 0 24 24"><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L17 9l1 1-2 2-6-6 2-2 1 1z"></path><path d="M13 8l-8 8v3h3l8-8"></path></svg></button>
+      <div style="width: 32px; height: 1px; background: #2e3035; margin: 6px 0"></div>
+      <button aria-label="Primary colour, secondary colour" style="position: relative; width: 44px; height: 44px; border: 0; background: transparent; cursor: pointer; padding: 0">
+        <span style="position: absolute; right: 4px; bottom: 4px; width: 22px; height: 22px; border-radius: 11px; background: #e8cfa4; border: 2px solid #1d1e22"></span>
+        <span style="position: absolute; left: 4px; top: 4px; width: 26px; height: 26px; border-radius: 13px; background: #3b2a1a; border: 2px solid #1d1e22; box-shadow: 0 0 0 1px #4a4c52"></span>
+      </button>
+    </div>
+
+    <div class="panel" style="position: absolute; left: 92px; top: 16px; height: 52px; padding: 0 14px; display: flex; align-items: center; gap: 18px; box-sizing: border-box">
+      <button class="chip" style="border: 0; padding: 0 6px 0 0; gap: 8px">
+        <span style="width: 28px; height: 28px; border-radius: 6px; background: #121316; display: flex; align-items: center; justify-content: center"><span style="width: 16px; height: 16px; border-radius: 8px; background: #d8d6d0; box-shadow: 0 0 6px 3px rgba(216,214,208,.35)"></span></span>
+        <span style="color: #ecebe8; font-size: 13px">Soft round</span>
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="fill: none; stroke: #9a9ca3; stroke-width: 2"><path d="M6 9l6 6 6-6"></path></svg>
+      </button>
+      <div style="display: flex; align-items: center; gap: 10px"><span class="lbl">Size</span><div class="track" style="width: 96px"><div class="fill" style="width: 38%"></div><div class="knob" style="left: 38%"></div></div><span class="num" style="width: 34px">64px</span></div>
+      <div style="display: flex; align-items: center; gap: 10px"><span class="lbl">Opacity</span><div class="track" style="width: 80px"><div class="fill" style="width: 85%"></div><div class="knob" style="left: 85%"></div></div><span class="num" style="width: 30px">85%</span></div>
+      <div style="display: flex; align-items: center; gap: 10px"><span class="lbl">Flow</span><div class="track" style="width: 64px"><div class="fill" style="width: 60%"></div><div class="knob" style="left: 60%"></div></div><span class="num" style="width: 30px">60%</span></div>
+      <span style="width: 1px; height: 24px; background: #2e3035"></span>
+      <div style="display: flex; align-items: center; gap: 6px"><span class="lbl" style="margin-right: 4px">Pen</span><button class="chip on">Size</button><button class="chip on">Opacity</button><button class="chip">Tilt</button></div>
+      <span style="width: 1px; height: 24px; background: #2e3035"></span>
+      <div style="display: flex; align-items: center; gap: 6px"><span class="lbl" style="margin-right: 4px">Paints</span><button class="chip on">Colour</button><button class="chip on">Rough</button><button class="chip">Metal</button><button class="chip on">Height</button></div>
+    </div>
+
+    <aside class="panel" style="position: absolute; right: 16px; top: 16px; bottom: 16px; width: 320px; display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px">
+        <div style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 14px; font-weight: 600">Layers</span><span style="font-size: 12px; color: #9a9ca3">Crate material · 4096 px</span></div>
+        <button class="ib sm" aria-label="Add layer" style="width: 34px; height: 34px; background: #2a2b30"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg></button>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 2px; padding: 0 8px">
+        <div class="layer sel">
+          <div class="thumb" style="background: #3b2a1a; background-image: radial-gradient(circle at 30% 40%, #5a3f26 0 30%, transparent 31%)"></div>
+          <div style="flex: 1; min-width: 0"><div style="font-size: 13px; font-weight: 500">Grime pass</div><div style="font-size: 12px; color: #9a9ca3">Paint · Multiply · masked</div></div>
+          <span class="num" style="color: #c9cad0">85%</span>
+          <button class="ib sm" aria-label="Hide Grime pass" style="width: 30px; height: 30px"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+        </div>
+        <div class="layer">
+          <div class="thumb" style="background: #2a2b2f; box-shadow: inset 0 0 0 2px #e8cfa4"></div>
+          <div style="flex: 1; min-width: 0"><div style="font-size: 13px; font-weight: 500">Edge wear</div><div style="font-size: 12px; color: #9a9ca3">Generator · Curvature</div></div>
+          <span class="num" style="color: #c9cad0">100%</span>
+          <button class="ib sm" aria-label="Hide Edge wear" style="width: 30px; height: 30px"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+        </div>
+        <div class="layer">
+          <div class="thumb" style="background-color: #6b3a1e; background-image: radial-gradient(circle at 70% 30%, #9b5a2a 0 18%, transparent 19%), radial-gradient(circle at 25% 75%, #8a4b22 0 14%, transparent 15%)"></div>
+          <div style="flex: 1; min-width: 0"><div style="font-size: 13px; font-weight: 500">Rust spots</div><div style="font-size: 12px; color: #9a9ca3">Fill · Pattern: Rust</div></div>
+          <span class="num" style="color: #c9cad0">40%</span>
+          <button class="ib sm" aria-label="Hide Rust spots" style="width: 30px; height: 30px"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+        </div>
+        <div class="layer">
+          <div class="thumb" style="background-color: #a2733f; background-image: repeating-linear-gradient(0deg, #8f6438 0 2px, transparent 2px 10px)"></div>
+          <div style="flex: 1; min-width: 0"><div style="font-size: 13px; font-weight: 500">Oak planks</div><div style="font-size: 12px; color: #9a9ca3">Material · from graph</div></div>
+          <span class="num" style="color: #c9cad0">100%</span>
+          <button class="ib sm" aria-label="Hide Oak planks" style="width: 30px; height: 30px"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+        </div>
+        <div class="layer">
+          <div class="thumb" style="background: #44474d"></div>
+          <div style="flex: 1; min-width: 0"><div style="font-size: 13px; font-weight: 500">Iron trim</div><div style="font-size: 12px; color: #9a9ca3">Material · ID mask</div></div>
+          <span class="num" style="color: #c9cad0">100%</span>
+          <button class="ib sm" aria-label="Hide Iron trim" style="width: 30px; height: 30px"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
+        </div>
+      </div>
+      <div style="height: 1px; background: #2a2c31; margin: 12px 0"></div>
+      <div style="padding: 0 16px; display: flex; flex-direction: column; gap: 16px">
+        <span class="lbl">Grime pass</span>
+        <div style="display: flex; align-items: center; justify-content: space-between"><span style="font-size: 13px; color: #c9cad0">Blend</span><button class="chip">Multiply<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" style="fill: none; stroke: currentColor; stroke-width: 2"><path d="M6 9l6 6 6-6"></path></svg></button></div>
+        <div style="display: flex; flex-direction: column; gap: 10px"><div style="display: flex; justify-content: space-between"><span style="font-size: 13px; color: #c9cad0">Roughness</span><span class="num">0.82</span></div><div class="track"><div class="fill" style="width: 82%"></div><div class="knob" style="left: 82%"></div></div></div>
+        <div style="display: flex; flex-direction: column; gap: 10px"><div style="display: flex; justify-content: space-between"><span style="font-size: 13px; color: #c9cad0">Height</span><span class="num">−0.15</span></div><div class="track"><div class="fill" style="left: 42%; width: 8%"></div><div class="knob" style="left: 42%"></div></div></div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap"><button class="chip">+ Mask from curvature</button><button class="chip">+ Mask from AO</button></div>
+      </div>
+    </aside>
+
+    <div class="panel" style="position: absolute; left: 50%; transform: translateX(-50%); margin-left: -168px; bottom: 16px; height: 48px; padding: 0 8px 0 16px; display: flex; align-items: center; gap: 16px; box-sizing: border-box">
+      <span class="num" style="color: #9a9ca3">4K · 5 maps · 144 fps</span>
+      <div class="seg" role="group" aria-label="View mode"><button class="on">Lit</button><button>Colour</button><button>Rough</button><button>Normal</button><button>UV check</button></div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

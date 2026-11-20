@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction B, Slate: docked workspace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#7ea4ff}a:hover{color:#a9c2ff}
+.dock{background:#1c2027;border:1px solid #2a2f38;border-radius:6px;display:flex;flex-direction:column;overflow:hidden}
+.dh{height:32px;display:flex;align-items:center;gap:2px;padding:0 6px;border-bottom:1px solid #2a2f38;background:#191c22}
+.tab{height:24px;padding:0 10px;border:0;border-radius:4px;background:transparent;color:#9aa3b2;font:500 12px 'IBM Plex Sans',sans-serif;cursor:pointer}
+.tab.on{background:#2a303b;color:#e6e9ef}
+.tb{width:34px;height:34px;border:0;border-radius:6px;background:transparent;color:#aeb6c4;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer}
+.tb svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.tb.on{background:#5b8cff;color:#0b1430}
+.mi{font-size:12.5px;color:#c3c9d4;padding:0 8px}
+.row{display:flex;align-items:center;gap:8px;height:34px;padding:0 8px;border-radius:4px;font-size:12.5px}
+.row.sel{background:#253150}
+.mono{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#aeb6c4}
+.ball{width:56px;height:56px;border-radius:28px}
+.cap{font-size:11.5px;color:#aeb6c4;text-align:center}
+.sl{display:flex;align-items:center;gap:8px;font-size:12px;color:#aeb6c4}
+.tr{flex:1;height:18px;border-radius:4px;background:#252a33;position:relative;overflow:hidden}
+.tf{position:absolute;left:0;top:0;bottom:0;background:#34497a}
+</style>
+</helmet>
+<div style="position: relative; width: 1440px; height: 900px; overflow: hidden; background: #111419; font-family: 'IBM Plex Sans', system-ui, sans-serif; color: #e6e9ef; display: flex; flex-direction: column">
+
+  <div style="height: 30px; display: flex; align-items: center; padding: 0 8px; background: #0d0f13; border-bottom: 1px solid #22262e; flex: none">
+    <span style="width: 18px; height: 18px; border-radius: 4px; background: #5b8cff; margin-right: 10px"></span>
+    <span class="mi">File</span><span class="mi">Edit</span><span class="mi">View</span><span class="mi">Model</span><span class="mi">UV</span><span class="mi">Texture</span><span class="mi">Material</span><span class="mi">Window</span><span class="mi">Help</span>
+    <span style="flex: 1"></span>
+    <span style="font-size: 12px; color: #8b94a3">old_crate.glb · Crate material</span>
+  </div>
+
+  <div style="height: 44px; display: flex; align-items: center; gap: 4px; padding: 0 8px; background: #161920; border-bottom: 1px solid #22262e; flex: none" role="toolbar" aria-label="Tools">
+    <button class="tb on" aria-label="Brush"><svg viewBox="0 0 24 24"><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L11 16.6 7.4 13z"></path><path d="M7.4 13C5 13 4 15 4 17c0 1.5-1 2.5-2 3 3 0 7-1 7-4.5"></path></svg></button>
+    <button class="tb" aria-label="Eraser"><svg viewBox="0 0 24 24"><path d="M8 20h12"></path><path d="M4.6 14.6l9-9a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L11 18.2H8.2z"></path></svg></button>
+    <button class="tb" aria-label="Smudge"><svg viewBox="0 0 24 24"><path d="M8 14V6a2 2 0 0 1 4 0v5"></path><path d="M12 10a2 2 0 0 1 4 0v2"></path><path d="M16 11a2 2 0 0 1 4 0v3a7 7 0 0 1-7 7h-1a6 6 0 0 1-5-3l-2.5-4a1.7 1.7 0 0 1 3-1.5L8 14"></path></svg></button>
+    <button class="tb" aria-label="Fill"><svg viewBox="0 0 24 24"><path d="M5 11l7-7 7 7-7 7z"></path><path d="M19 15s2 2.5 2 4a2 2 0 0 1-4 0c0-1.5 2-4 2-4z"></path></svg></button>
+    <button class="tb" aria-label="Clone stamp"><svg viewBox="0 0 24 24"><path d="M9 4h6v5l3 3H6l3-3z"></path><path d="M5 15h14v3H5zM7 21h10"></path></svg></button>
+    <button class="tb" aria-label="Decal projection"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M4 15l4-4 4 4 3-3 5 5"></path></svg></button>
+    <button class="tb" aria-label="Colour picker"><svg viewBox="0 0 24 24"><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L17 9l1 1-2 2-6-6 2-2 1 1z"></path><path d="M13 8l-8 8v3h3l8-8"></path></svg></button>
+    <span style="width: 1px; height: 22px; background: #2a2f38; margin: 0 8px"></span>
+    <div class="sl" style="width: 170px">Size<div class="tr"><div class="tf" style="width: 40%"></div><span class="mono" style="position: absolute; right: 6px; top: 1px; color: #e6e9ef">64</span></div></div>
+    <div class="sl" style="width: 170px; margin-left: 12px">Opacity<div class="tr"><div class="tf" style="width: 85%"></div><span class="mono" style="position: absolute; right: 6px; top: 1px; color: #e6e9ef">85</span></div></div>
+    <div class="sl" style="width: 150px; margin-left: 12px">Flow<div class="tr"><div class="tf" style="width: 60%"></div><span class="mono" style="position: absolute; right: 6px; top: 1px; color: #e6e9ef">60</span></div></div>
+    <span style="width: 1px; height: 22px; background: #2a2f38; margin: 0 8px"></span>
+    <span style="font-size: 12px; color: #8b94a3">Symmetry</span><button class="tab on" style="margin-left: 4px">X</button><button class="tab">Y</button><button class="tab">Z</button>
+    <span style="flex: 1"></span>
+    <button style="height: 30px; padding: 0 14px; border: 0; border-radius: 6px; background: #5b8cff; color: #0b1430; font: 600 12.5px 'IBM Plex Sans', sans-serif; cursor: pointer">Export…</button>
+  </div>
+
+  <div style="flex: 1; display: flex; gap: 4px; padding: 4px; min-height: 0">
+    <section class="dock" style="width: 232px; flex: none">
+      <div class="dh"><button class="tab on">Brushes</button><button class="tab">Alphas</button><button class="tab">Stencils</button></div>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px">
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; border-radius: 6px; background: #253150"><span style="width: 40px; height: 40px; border-radius: 20px; background: #d6dae2; box-shadow: 0 0 8px 4px rgba(214,218,226,.3)"></span><span class="cap" style="color: #e6e9ef">Soft</span></div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0"><span style="width: 40px; height: 40px; border-radius: 20px; background: #d6dae2"></span><span class="cap">Hard</span></div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0"><span style="width: 40px; height: 40px; border-radius: 4px; background: repeating-linear-gradient(45deg, #d6dae2 0 3px, transparent 3px 7px)"></span><span class="cap">Hatch</span></div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0"><span style="width: 40px; height: 40px; border-radius: 20px; background: radial-gradient(circle at 30% 30%, #d6dae2 0 3px, transparent 4px), radial-gradient(circle at 70% 55%, #d6dae2 0 4px, transparent 5px), radial-gradient(circle at 40% 75%, #d6dae2 0 2px, transparent 3px)"></span><span class="cap">Spatter</span></div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0"><span style="width: 40px; height: 12px; margin: 14px 0; border-radius: 6px; background: #d6dae2"></span><span class="cap">Chisel</span></div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0"><span style="width: 40px; height: 40px; border-radius: 20px; border: 3px dotted #d6dae2; box-sizing: border-box"></span><span class="cap">Scratch</span></div>
+      </div>
+      <div style="height: 1px; background: #2a2f38"></div>
+      <div style="padding: 10px; display: flex; flex-direction: column; gap: 10px">
+        <span style="font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #8b94a3">Pen pressure</span>
+        <svg viewBox="0 0 200 110" width="210" height="110" role="img" aria-label="Pressure curve" style="background: #14171c; border-radius: 6px">
+          <path d="M0 110C70 108 110 40 200 0" fill="none" stroke="#5b8cff" stroke-width="2"></path>
+          <circle cx="0" cy="110" r="4" fill="#e6e9ef"></circle><circle cx="105" cy="58" r="4" fill="#e6e9ef"></circle><circle cx="200" cy="0" r="4" fill="#e6e9ef"></circle>
+        </svg>
+        <div class="sl">Affects<button class="tab on">Size</button><button class="tab on">Opacity</button><button class="tab">Flow</button></div>
+      </div>
+    </section>
+
+    <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0">
+      <div style="flex: 1; display: flex; gap: 4px; min-height: 0">
+        <section class="dock" style="flex: 1">
+          <div class="dh"><button class="tab on">3D</button><span style="flex: 1"></span><button class="tab">Lit</button><button class="tab">Colour</button><button class="tab">Rough</button></div>
+          <div style="flex: 1; position: relative; background: #23272e">
+            <svg viewBox="0 0 600 620" width="330" height="340" role="img" aria-label="Wooden crate model" style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%)">
+              <ellipse cx="300" cy="575" rx="250" ry="38" fill="#000" opacity=".35"></ellipse>
+              <polygon points="300,40 520,167 300,294 80,167" fill="#c49461"></polygon>
+              <polygon points="80,167 300,294 300,548 80,421" fill="#a2733f"></polygon>
+              <polygon points="300,294 520,167 520,421 300,548" fill="#7c5530"></polygon>
+              <g stroke="#5a3c20" stroke-width="2.5" opacity=".7"><path d="M135 198.75L355 71.75M190 230.5L410 103.5M245 262.25L465 135.25M80 230.5L300 357.5M80 294L300 421M80 357.5L300 484.5M300 357.5L520 230.5M300 421L520 294M300 484.5L520 357.5"></path></g>
+              <path d="M110 320C160 350 205 345 240 390S285 470 270 505" fill="none" stroke="#3b2a1a" stroke-width="30" stroke-linecap="round" opacity=".5"></path>
+              <g fill="none" stroke="#3a3d42" stroke-width="12" stroke-linejoin="round"><polygon points="300,40 520,167 300,294 80,167"></polygon><path d="M80 167V421L300 548L520 421V167M300 294V548"></path></g>
+            </svg>
+          </div>
+        </section>
+        <section class="dock" style="flex: 1">
+          <div class="dh"><button class="tab on">2D texture</button><span style="flex: 1"></span><span class="mono" style="padding-right: 6px">4096 × 4096</span></div>
+          <div style="flex: 1; position: relative; background-color: #1a1d23; background-image: linear-gradient(45deg, #20242b 25%, transparent 25%, transparent 75%, #20242b 75%), linear-gradient(45deg, #20242b 25%, transparent 25%, transparent 75%, #20242b 75%); background-size: 24px 24px; background-position: 0 0, 12px 12px">
+            <svg viewBox="0 0 400 400" width="330" height="330" role="img" aria-label="Unwrapped texture islands" style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%)">
+              <rect x="0" y="0" width="400" height="400" fill="none" stroke="#3a4150"></rect>
+              <rect x="12" y="12" width="180" height="180" fill="#c49461"></rect>
+              <rect x="208" y="12" width="180" height="180" fill="#a2733f"></rect>
+              <rect x="12" y="208" width="180" height="180" fill="#7c5530"></rect>
+              <rect x="208" y="208" width="88" height="180" fill="#9c6e3c"></rect>
+              <rect x="304" y="208" width="84" height="84" fill="#44474d"></rect>
+              <rect x="304" y="304" width="84" height="84" fill="#44474d"></rect>
+              <g stroke="#5a3c20" stroke-width="2" opacity=".7"><path d="M12 57H192M12 102H192M12 147H192M208 57H388M208 102H388M208 147H388M12 253H192M12 298H192M12 343H192"></path></g>
+              <path d="M30 230C80 250 120 260 150 300S170 360 160 380" fill="none" stroke="#3b2a1a" stroke-width="22" stroke-linecap="round" opacity=".5"></path>
+              <circle cx="120" cy="290" r="20" fill="none" stroke="#f4f2ee" stroke-width="1.5"></circle>
+            </svg>
+          </div>
+        </section>
+      </div>
+      <section class="dock" style="height: 150px; flex: none">
+        <div class="dh"><button class="tab on">Materials</button><button class="tab">Smart materials</button><button class="tab">Patterns</button><button class="tab">Decals</button><span style="flex: 1"></span><span class="mono" style="padding-right: 6px">Drag onto model or layer</span></div>
+        <div style="flex: 1; display: flex; gap: 18px; align-items: center; padding: 0 16px">
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #e0b27c, #8f6438 55%, #3a2614)"></span><span class="cap">Oak</span></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #f2f4f7, #8b9099 40%, #2b2e33)"></span><span class="cap">Steel</span></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #c27a45, #7a3d1c 55%, #2e160a)"></span><span class="cap">Rust</span></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #b8b3a8, #77736b 55%, #2f2d29)"></span><span class="cap">Concrete</span></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #9a6b4a, #5a3a26 55%, #1f130b)"></span><span class="cap">Leather</span></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #ffe7a3, #c99a2e 45%, #4a3407)"></span><span class="cap">Brass</span></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #8fb07a, #4c6b3c 55%, #1a2614)"></span><span class="cap">Moss</span></div>
+          <div style="display: flex; flex-direction: column; gap: 6px; align-items: center"><span class="ball" style="background: radial-gradient(circle at 35% 30%, #6d7480, #3a3f48 55%, #15181c)"></span><span class="cap">Slate</span></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="dock" style="width: 290px; flex: none">
+      <div class="dh"><button class="tab on">Layers</button><button class="tab">Texture sets</button><button class="tab">History</button></div>
+      <div style="padding: 6px; display: flex; flex-direction: column; gap: 1px">
+        <div class="row sel"><span style="width: 22px; height: 22px; border-radius: 3px; background: #3b2a1a"></span><span style="flex: 1">Grime pass</span><span class="mono">Mul 85</span></div>
+        <div class="row"><span style="width: 22px; height: 22px; border-radius: 3px; background: #2a2b2f; box-shadow: inset 0 0 0 2px #e8cfa4"></span><span style="flex: 1">Edge wear</span><span class="mono">Norm 100</span></div>
+        <div class="row"><span style="width: 22px; height: 22px; border-radius: 3px; background: #6b3a1e"></span><span style="flex: 1">Rust spots</span><span class="mono">Ovl 40</span></div>
+        <div class="row"><span style="width: 22px; height: 22px; border-radius: 3px; background: #a2733f"></span><span style="flex: 1">Oak planks</span><span class="mono">Norm 100</span></div>
+        <div class="row"><span style="width: 22px; height: 22px; border-radius: 3px; background: #44474d"></span><span style="flex: 1">Iron trim</span><span class="mono">Norm 100</span></div>
+      </div>
+      <div class="dh" style="border-top: 1px solid #2a2f38"><button class="tab on">Properties</button></div>
+      <div style="padding: 12px; display: flex; flex-direction: column; gap: 10px">
+        <div class="sl" style="justify-content: space-between">Channels</div>
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px">
+          <button class="tab on">Colour</button><button class="tab on">Rough</button><button class="tab">Metal</button><button class="tab">Normal</button><button class="tab on">Height</button><button class="tab">AO</button>
+        </div>
+        <div class="sl"><span style="width: 70px">Roughness</span><div class="tr"><div class="tf" style="width: 82%"></div><span class="mono" style="position: absolute; right: 6px; top: 1px; color: #e6e9ef">0.82</span></div></div>
+        <div class="sl"><span style="width: 70px">Height</span><div class="tr"><div class="tf" style="width: 42%"></div><span class="mono" style="position: absolute; right: 6px; top: 1px; color: #e6e9ef">−0.15</span></div></div>
+        <div class="sl"><span style="width: 70px">Opacity</span><div class="tr"><div class="tf" style="width: 85%"></div><span class="mono" style="position: absolute; right: 6px; top: 1px; color: #e6e9ef">85</span></div></div>
+        <div class="sl"><span style="width: 70px">Blend</span><button class="tab" style="flex: 1; text-align: left; background: #252a33">Multiply</button></div>
+      </div>
+    </section>
+  </div>
+
+  <div style="height: 24px; display: flex; align-items: center; gap: 18px; padding: 0 10px; background: #0d0f13; border-top: 1px solid #22262e; flex: none">
+    <span class="mono">GPU RTX 4080 SUPER · 1.2 GB</span><span class="mono">144 fps</span><span class="mono">Huion GS1333 · pressure 0.62</span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

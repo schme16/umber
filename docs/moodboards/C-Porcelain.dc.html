@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction C, Porcelain: light workspace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#2f4fd6}a:hover{color:#1f37a3}
+.card{background:#fbfaf8;border:1px solid #dedbd5;border-radius:18px;box-shadow:0 6px 24px rgba(40,36,30,.08)}
+.tool{display:flex;align-items:center;gap:12px;height:44px;padding:0 12px;border:0;border-radius:12px;background:transparent;color:#3b3a37;font:500 14px Manrope,sans-serif;cursor:pointer;width:100%;text-align:left}
+.tool svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.tool.on{background:#2f4fd6;color:#fff}
+.k{margin-left:auto;font:500 11px 'DM Mono',monospace;color:#6b6a66;background:#efede9;border-radius:5px;padding:2px 6px}
+.tool.on .k{background:rgba(255,255,255,.18);color:#fff}
+.utab{height:52px;display:flex;align-items:center;padding:0 4px;border:0;background:transparent;font:600 14px Manrope,sans-serif;color:#6b6a66;cursor:pointer;box-shadow:inset 0 -2px 0 transparent}
+.utab.on{color:#1d1d1f;box-shadow:inset 0 -2px 0 #2f4fd6}
+.lc{display:flex;gap:12px;align-items:center;padding:10px;border-radius:14px}
+.lc.sel{background:#e9edfc}
+.lt{width:52px;height:52px;border-radius:10px;flex:none}
+.sub{font-size:12.5px;color:#5e5d5a}
+.mono{font-family:'DM Mono',monospace;font-size:12px;color:#3b3a37}
+.track{position:relative;height:6px;border-radius:3px;background:#e2dfd9}
+.fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:#2f4fd6}
+.knob{position:absolute;top:-6px;width:18px;height:18px;border-radius:9px;background:#fff;border:1px solid #c9c5be;margin-left:-9px;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+</style>
+</helmet>
+<div style="position: relative; width: 1440px; height: 900px; overflow: hidden; background: #eeece8; font-family: Manrope, system-ui, sans-serif; color: #1d1d1f">
+
+  <header style="position: absolute; left: 0; right: 0; top: 0; height: 52px; display: flex; align-items: center; gap: 28px; padding: 0 20px; background: #fbfaf8; border-bottom: 1px solid #dedbd5; box-sizing: border-box">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <span style="width: 24px; height: 24px; border-radius: 12px; background: #1d1d1f; display: flex; align-items: center; justify-content: center"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" style="fill: none; stroke: #fbfaf8; stroke-width: 2.4; stroke-linecap: round"><path d="M6 5v8a6 6 0 0 0 12 0V5"></path></svg></span>
+      <span style="font-weight: 700; font-size: 15px">UV Paint</span>
+      <span style="color: #9b9893">/</span>
+      <span style="font-size: 14px; color: #3b3a37">old_crate</span>
+    </div>
+    <nav style="display: flex; gap: 24px" aria-label="Workspaces"><button class="utab on">Paint</button><button class="utab">UV</button><button class="utab">Materials</button><button class="utab">Export</button></nav>
+    <span style="flex: 1"></span>
+    <button style="height: 36px; padding: 0 16px; border: 1px solid #d6d3cd; border-radius: 18px; background: #fbfaf8; color: #1d1d1f; font: 600 13px Manrope, sans-serif; cursor: pointer">Share preview</button>
+    <button style="height: 36px; padding: 0 18px; border: 0; border-radius: 18px; background: #1d1d1f; color: #fbfaf8; font: 600 13px Manrope, sans-serif; cursor: pointer">Export</button>
+  </header>
+
+  <div style="position: absolute; left: 236px; right: 356px; top: 68px; bottom: 16px; border-radius: 20px; background: #9d9c98; overflow: hidden">
+    <div style="position: absolute; left: 0; right: 0; bottom: 0; height: 38%; background: #92918d"></div>
+    <svg viewBox="0 0 600 620" width="470" height="486" role="img" aria-label="Wooden crate model being painted" style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -52%)">
+      <ellipse cx="300" cy="575" rx="250" ry="38" fill="#000" opacity=".22"></ellipse>
+      <polygon points="300,40 520,167 300,294 80,167" fill="#c49461"></polygon>
+      <polygon points="80,167 300,294 300,548 80,421" fill="#a2733f"></polygon>
+      <polygon points="300,294 520,167 520,421 300,548" fill="#7c5530"></polygon>
+      <g stroke="#5a3c20" stroke-width="2.5" opacity=".7"><path d="M135 198.75L355 71.75M190 230.5L410 103.5M245 262.25L465 135.25M80 230.5L300 357.5M80 294L300 421M80 357.5L300 484.5M300 357.5L520 230.5M300 421L520 294M300 484.5L520 357.5"></path></g>
+      <path d="M110 320C160 350 205 345 240 390S285 470 270 505" fill="none" stroke="#3b2a1a" stroke-width="30" stroke-linecap="round" opacity=".5"></path>
+      <g fill="none" stroke="#3a3d42" stroke-width="12" stroke-linejoin="round"><polygon points="300,40 520,167 300,294 80,167"></polygon><path d="M80 167V421L300 548L520 421V167M300 294V548"></path></g>
+      <circle cx="252" cy="410" r="32" fill="none" stroke="#fff" stroke-width="1.5"></circle>
+    </svg>
+    <div style="position: absolute; left: 50%; transform: translateX(-50%); bottom: 16px; display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 16px; border-radius: 20px; background: rgba(251,250,248,.94); font-size: 13px; color: #3b3a37; white-space: nowrap">
+      <span>Hold</span><span class="k" style="margin: 0">Alt</span><span>to pick colour</span><span style="color: #9b9893">·</span><span class="k" style="margin: 0">[</span><span class="k" style="margin: 0">]</span><span>brush size</span><span style="color: #9b9893">·</span><span>Right-drag to orbit</span>
+    </div>
+    <div style="position: absolute; right: 14px; top: 14px; display: flex; gap: 6px">
+      <button style="height: 32px; padding: 0 12px; border: 0; border-radius: 16px; background: #fbfaf8; font: 600 12.5px Manrope, sans-serif; color: #1d1d1f">Lit</button>
+      <button style="height: 32px; padding: 0 12px; border: 0; border-radius: 16px; background: rgba(251,250,248,.55); font: 600 12.5px Manrope, sans-serif; color: #1d1d1f">Colour only</button>
+      <button style="height: 32px; padding: 0 12px; border: 0; border-radius: 16px; background: rgba(251,250,248,.55); font: 600 12.5px Manrope, sans-serif; color: #1d1d1f">Split 3D + 2D</button>
+    </div>
+  </div>
+
+  <aside class="card" style="position: absolute; left: 16px; top: 68px; width: 204px; bottom: 16px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 2px" role="toolbar" aria-label="Tools">
+    <button class="tool on"><svg viewBox="0 0 24 24"><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L11 16.6 7.4 13z"></path><path d="M7.4 13C5 13 4 15 4 17c0 1.5-1 2.5-2 3 3 0 7-1 7-4.5"></path></svg>Brush<span class="k">B</span></button>
+    <button class="tool"><svg viewBox="0 0 24 24"><path d="M8 20h12"></path><path d="M4.6 14.6l9-9a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L11 18.2H8.2z"></path></svg>Eraser<span class="k">E</span></button>
+    <button class="tool"><svg viewBox="0 0 24 24"><path d="M8 14V6a2 2 0 0 1 4 0v5"></path><path d="M12 10a2 2 0 0 1 4 0v2"></path><path d="M16 11a2 2 0 0 1 4 0v3a7 7 0 0 1-7 7h-1a6 6 0 0 1-5-3l-2.5-4a1.7 1.7 0 0 1 3-1.5L8 14"></path></svg>Smudge<span class="k">S</span></button>
+    <button class="tool"><svg viewBox="0 0 24 24"><path d="M5 11l7-7 7 7-7 7z"></path><path d="M19 15s2 2.5 2 4a2 2 0 0 1-4 0c0-1.5 2-4 2-4z"></path></svg>Fill<span class="k">G</span></button>
+    <button class="tool"><svg viewBox="0 0 24 24"><path d="M9 4h6v5l3 3H6l3-3z"></path><path d="M5 15h14v3H5zM7 21h10"></path></svg>Clone<span class="k">C</span></button>
+    <button class="tool"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M4 15l4-4 4 4 3-3 5 5"></path></svg>Decal<span class="k">D</span></button>
+    <button class="tool"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" stroke-dasharray="3 3"></circle></svg>Mask<span class="k">M</span></button>
+    <div style="height: 1px; background: #e4e1db; margin: 10px 4px"></div>
+    <span class="sub" style="padding: 0 12px 8px">Colour</span>
+    <svg viewBox="0 0 160 160" width="168" height="168" role="img" aria-label="Colour wheel" style="align-self: center">
+      <circle cx="80" cy="80" r="70" fill="none" stroke="#e05252" stroke-width="16" stroke-dasharray="73.3 366.5"></circle>
+      <circle cx="80" cy="80" r="70" fill="none" stroke="#e0b252" stroke-width="16" stroke-dasharray="73.3 366.5" stroke-dashoffset="-73.3"></circle>
+      <circle cx="80" cy="80" r="70" fill="none" stroke="#5fbf6a" stroke-width="16" stroke-dasharray="73.3 366.5" stroke-dashoffset="-146.6"></circle>
+      <circle cx="80" cy="80" r="70" fill="none" stroke="#4fb3c9" stroke-width="16" stroke-dasharray="73.3 366.5" stroke-dashoffset="-219.9"></circle>
+      <circle cx="80" cy="80" r="70" fill="none" stroke="#4f6bd6" stroke-width="16" stroke-dasharray="73.3 366.5" stroke-dashoffset="-293.2"></circle>
+      <circle cx="80" cy="80" r="70" fill="none" stroke="#b052d0" stroke-width="16" stroke-dasharray="73.3 366.5" stroke-dashoffset="-366.5"></circle>
+      <rect x="42" y="42" width="76" height="76" rx="6" fill="#3b2a1a"></rect>
+      <circle cx="104" cy="12" r="8" fill="none" stroke="#fff" stroke-width="3"></circle>
+      <circle cx="70" cy="84" r="6" fill="none" stroke="#fff" stroke-width="2.5"></circle>
+    </svg>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; padding: 10px 8px 0">
+      <span style="aspect-ratio: 1; border-radius: 6px; background: #3b2a1a"></span><span style="aspect-ratio: 1; border-radius: 6px; background: #e8cfa4"></span><span style="aspect-ratio: 1; border-radius: 6px; background: #a2733f"></span><span style="aspect-ratio: 1; border-radius: 6px; background: #6b3a1e"></span><span style="aspect-ratio: 1; border-radius: 6px; background: #44474d"></span><span style="aspect-ratio: 1; border-radius: 6px; background: #c9c3b6"></span>
+    </div>
+  </aside>
+
+  <aside class="card" style="position: absolute; right: 16px; top: 68px; width: 324px; bottom: 16px; padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 14px">
+    <div style="display: flex; align-items: center; justify-content: space-between"><span style="font-size: 16px; font-weight: 700">Layers</span><button style="height: 32px; padding: 0 12px; border: 1px solid #d6d3cd; border-radius: 16px; background: #fbfaf8; font: 600 12.5px Manrope, sans-serif; color: #1d1d1f; cursor: pointer">+ New layer</button></div>
+    <div style="display: flex; flex-direction: column; gap: 2px; margin: 0 -6px">
+      <div class="lc sel"><span class="lt" style="background: #3b2a1a"></span><div style="flex: 1"><div style="font-weight: 600; font-size: 14px">Grime pass</div><div class="sub">Painted · darkens</div></div><span class="mono">85%</span></div>
+      <div class="lc"><span class="lt" style="background: #2a2b2f; box-shadow: inset 0 0 0 3px #e8cfa4"></span><div style="flex: 1"><div style="font-weight: 600; font-size: 14px">Edge wear</div><div class="sub">Automatic · worn edges</div></div><span class="mono">100%</span></div>
+      <div class="lc"><span class="lt" style="background: #6b3a1e"></span><div style="flex: 1"><div style="font-weight: 600; font-size: 14px">Rust spots</div><div class="sub">Pattern · rust</div></div><span class="mono">40%</span></div>
+      <div class="lc"><span class="lt" style="background-color: #a2733f; background-image: repeating-linear-gradient(0deg, #8f6438 0 2px, transparent 2px 12px)"></span><div style="flex: 1"><div style="font-weight: 600; font-size: 14px">Oak planks</div><div class="sub">Material</div></div><span class="mono">100%</span></div>
+    </div>
+    <div style="height: 1px; background: #e4e1db"></div>
+    <span style="font-size: 14px; font-weight: 700">Brush</span>
+    <div style="display: flex; flex-direction: column; gap: 8px"><div style="display: flex; justify-content: space-between; font-size: 13px"><span>Size</span><span class="mono">64 px</span></div><div class="track"><div class="fill" style="width: 38%"></div><div class="knob" style="left: 38%"></div></div></div>
+    <div style="display: flex; flex-direction: column; gap: 8px"><div style="display: flex; justify-content: space-between; font-size: 13px"><span>Strength</span><span class="mono">85%</span></div><div class="track"><div class="fill" style="width: 85%"></div><div class="knob" style="left: 85%"></div></div></div>
+    <div style="display: flex; flex-direction: column; gap: 8px"><div style="display: flex; justify-content: space-between; font-size: 13px"><span>Softness</span><span class="mono">60%</span></div><div class="track"><div class="fill" style="width: 60%"></div><div class="knob" style="left: 60%"></div></div></div>
+    <div style="display: flex; flex-direction: column; gap: 8px">
+      <span style="font-size: 13px">This brush paints</span>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px">
+        <span style="padding: 6px 12px; border-radius: 14px; background: #1d1d1f; color: #fbfaf8; font-size: 12.5px; font-weight: 600">Colour</span>
+        <span style="padding: 6px 12px; border-radius: 14px; background: #1d1d1f; color: #fbfaf8; font-size: 12.5px; font-weight: 600">Roughness</span>
+        <span style="padding: 6px 12px; border-radius: 14px; border: 1px solid #d6d3cd; font-size: 12.5px; font-weight: 600">Metal</span>
+        <span style="padding: 6px 12px; border-radius: 14px; background: #1d1d1f; color: #fbfaf8; font-size: 12.5px; font-weight: 600">Bumps</span>
+      </div>
+    </div>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-11-20T10:40:00+10:00"},
+  "title": "UV Paint — UI Mood Boards",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 1440, "h": 900, "title": "A · Graphite: floating, viewport-first"},
+    "B-Slate.dc.html": {"x": 1520, "y": 0, "w": 1440, "h": 900, "title": "B · Slate: docked pro workspace"},
+    "C-Porcelain.dc.html": {"x": 3040, "y": 0, "w": 1440, "h": 900, "title": "C · Porcelain: light, airy"},
+    "A-Tablet.dc.html": {"x": 0, "y": 1400, "w": 1280, "h": 720, "title": "A · Tablet, Kamvas 13 at 150% (1280×720)"},
+    "A-UV.dc.html": {"x": 1360, "y": 1400, "w": 1440, "h": 900, "title": "A · UV workspace"},
+    "A-Nodes.dc.html": {"x": 2880, "y": 1400, "w": 1440, "h": 900, "title": "A · Material graph workspace"}
+  },
+  "order": ["Main.dc.html", "B-Slate.dc.html", "C-Porcelain.dc.html", "A-Tablet.dc.html", "A-UV.dc.html", "A-Nodes.dc.html"],
+  "notes": {
+    "row1": {"x": 0, "y": -300, "text": "Three visual directions: the Paint workspace", "kind": "title1", "maxW": 4480},
+    "row2": {"x": 0, "y": 1100, "text": "Direction A carried through: tablet, UV, materials", "kind": "title1", "maxW": 4320}
+  },
+  "designSystems": []
+}

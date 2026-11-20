@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction A on a 13 inch pen display</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#f0a646}a:hover{color:#ffc27a}
+.panel{background:#1d1e22;border:1px solid #2e3035;border-radius:16px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.ib{width:52px;height:52px;border:0;border-radius:12px;background:transparent;color:#c2c4ca;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.ib svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.rb{position:absolute;width:52px;height:52px;border-radius:26px;border:0;background:#2a2b31;color:#d6d7dc;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.rb svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.rb.on{background:#f0a646;color:#1a1206}
+.vs{position:relative;width:8px;height:150px;border-radius:4px;background:#34363c;margin:0 auto}
+.vf{position:absolute;left:0;right:0;bottom:0;border-radius:4px;background:#f0a646}
+.vk{position:absolute;left:-10px;width:28px;height:28px;border-radius:14px;background:#ecebe8;margin-bottom:-14px;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+.num{font-family:'JetBrains Mono',monospace;font-size:12px;color:#ecebe8;text-align:center}
+.seg{display:flex;background:#1b1c20;border:1px solid #2a2c31;border-radius:12px;padding:3px;gap:2px}
+.seg button{height:40px;padding:0 16px;border:0;border-radius:9px;background:transparent;color:#a3a5ab;font:500 14px Inter,sans-serif;cursor:pointer}
+.seg button.on{background:#2d2f35;color:#f3f2ef}
+</style>
+</helmet>
+<div style="position: relative; width: 1280px; height: 720px; overflow: hidden; background: #1a1b1e; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 48px 48px; font-family: Inter, system-ui, sans-serif; color: #ecebe8">
+
+  <svg viewBox="0 0 600 620" width="440" height="455" role="img" aria-label="Wooden crate model being painted" style="position: absolute; left: 420px; top: 150px">
+    <ellipse cx="300" cy="575" rx="250" ry="38" fill="#000" opacity=".35"></ellipse>
+    <polygon points="300,40 520,167 300,294 80,167" fill="#c49461"></polygon>
+    <polygon points="80,167 300,294 300,548 80,421" fill="#a2733f"></polygon>
+    <polygon points="300,294 520,167 520,421 300,548" fill="#7c5530"></polygon>
+    <g stroke="#5a3c20" stroke-width="2.5" opacity=".7"><path d="M135 198.75L355 71.75M190 230.5L410 103.5M245 262.25L465 135.25M80 230.5L300 357.5M80 294L300 421M80 357.5L300 484.5M300 357.5L520 230.5M300 421L520 294M300 484.5L520 357.5"></path></g>
+    <path d="M110 320C160 350 205 345 240 390S285 470 270 505" fill="none" stroke="#3b2a1a" stroke-width="30" stroke-linecap="round" opacity=".5"></path>
+    <g fill="none" stroke="#3a3d42" stroke-width="12" stroke-linejoin="round"><polygon points="300,40 520,167 300,294 80,167"></polygon><path d="M80 167V421L300 548L520 421V167M300 294V548"></path></g>
+  </svg>
+
+  <header style="position: absolute; left: 12px; right: 12px; top: 12px; height: 60px; display: flex; align-items: center; gap: 8px; padding: 0 6px" class="panel">
+    <button class="ib" aria-label="Menu"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path></svg></button>
+    <span style="font-size: 15px; font-weight: 500">old_crate</span>
+    <span style="flex: 1"></span>
+    <nav class="seg" aria-label="Workspaces"><button class="on">Paint</button><button>UV</button><button>Materials</button><button>Export</button></nav>
+    <span style="flex: 1"></span>
+    <button class="ib" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"></path><path d="M4 9h10a6 6 0 0 1 0 12h-3"></path></svg></button>
+    <button class="ib" aria-label="Redo"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"></path><path d="M20 9H10a6 6 0 0 0 0 12h3"></path></svg></button>
+  </header>
+
+  <div class="panel" style="position: absolute; left: 12px; top: 120px; width: 64px; padding: 18px 0; display: flex; flex-direction: column; gap: 14px; align-items: center">
+    <span style="font-size: 11px; color: #9a9ca3; text-transform: uppercase; letter-spacing: .06em">Size</span>
+    <div class="vs"><div class="vf" style="height: 40%"></div><div class="vk" style="bottom: 40%"></div></div>
+    <span class="num">64</span>
+    <div style="width: 32px; height: 1px; background: #2e3035"></div>
+    <span style="font-size: 11px; color: #9a9ca3; text-transform: uppercase; letter-spacing: .06em">Opac</span>
+    <div class="vs"><div class="vf" style="height: 85%"></div><div class="vk" style="bottom: 85%"></div></div>
+    <span class="num">85%</span>
+  </div>
+
+  <div style="position: absolute; left: 514px; top: 254px; width: 252px; height: 252px; border-radius: 126px; background: rgba(23,24,27,.9); border: 1px solid #34363c; box-sizing: border-box; box-shadow: 0 18px 48px rgba(0,0,0,.55)"></div>
+  <button class="rb on" aria-label="Brush" style="left: 614px; top: 262px"><svg viewBox="0 0 24 24"><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L11 16.6 7.4 13z"></path><path d="M7.4 13C5 13 4 15 4 17c0 1.5-1 2.5-2 3 3 0 7-1 7-4.5"></path></svg></button>
+  <button class="rb" aria-label="Eraser" style="left: 679px; top: 289px"><svg viewBox="0 0 24 24"><path d="M8 20h12"></path><path d="M4.6 14.6l9-9a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L11 18.2H8.2z"></path></svg></button>
+  <button class="rb" aria-label="Smudge" style="left: 706px; top: 354px"><svg viewBox="0 0 24 24"><path d="M8 14V6a2 2 0 0 1 4 0v5"></path><path d="M12 10a2 2 0 0 1 4 0v2"></path><path d="M16 11a2 2 0 0 1 4 0v3a7 7 0 0 1-7 7h-1a6 6 0 0 1-5-3l-2.5-4a1.7 1.7 0 0 1 3-1.5L8 14"></path></svg></button>
+  <button class="rb" aria-label="Fill" style="left: 679px; top: 419px"><svg viewBox="0 0 24 24"><path d="M5 11l7-7 7 7-7 7z"></path><path d="M19 15s2 2.5 2 4a2 2 0 0 1-4 0c0-1.5 2-4 2-4z"></path></svg></button>
+  <button class="rb" aria-label="Mask" style="left: 614px; top: 446px"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" stroke-dasharray="3 3"></circle></svg></button>
+  <button class="rb" aria-label="Decal" style="left: 549px; top: 419px"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M4 15l4-4 4 4 3-3 5 5"></path></svg></button>
+  <button class="rb" aria-label="Clone" style="left: 522px; top: 354px"><svg viewBox="0 0 24 24"><path d="M9 4h6v5l3 3H6l3-3z"></path><path d="M5 15h14v3H5zM7 21h10"></path></svg></button>
+  <button class="rb" aria-label="Colour picker" style="left: 549px; top: 289px"><svg viewBox="0 0 24 24"><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L17 9l1 1-2 2-6-6 2-2 1 1z"></path><path d="M13 8l-8 8v3h3l8-8"></path></svg></button>
+  <button aria-label="Current colour, tap to open colour wheel" style="position: absolute; left: 612px; top: 352px; width: 56px; height: 56px; border-radius: 28px; background: #3b2a1a; border: 3px solid #ecebe8; padding: 0; cursor: pointer"></button>
+  <div style="position: absolute; left: 640px; top: 522px; transform: translateX(-50%); padding: 6px 12px; border-radius: 14px; background: rgba(23,24,27,.9); font-size: 12.5px; color: #c9cad0; white-space: nowrap">Pen side button · flick to choose</div>
+
+  <aside class="panel" style="position: absolute; right: 12px; top: 120px; width: 72px; padding: 10px 0; display: flex; flex-direction: column; align-items: center; gap: 10px" aria-label="Layers, collapsed">
+    <span style="font-size: 11px; color: #9a9ca3; text-transform: uppercase; letter-spacing: .06em">Layers</span>
+    <button aria-label="Grime pass, selected" style="width: 48px; height: 48px; border-radius: 10px; background: #3b2a1a; border: 2px solid #f0a646; padding: 0"></button>
+    <button aria-label="Edge wear" style="width: 48px; height: 48px; border-radius: 10px; background: #2a2b2f; box-shadow: inset 0 0 0 3px #e8cfa4; border: 0; padding: 0"></button>
+    <button aria-label="Rust spots" style="width: 48px; height: 48px; border-radius: 10px; background: #6b3a1e; border: 0; padding: 0"></button>
+    <button aria-label="Oak planks" style="width: 48px; height: 48px; border-radius: 10px; background: #a2733f; border: 0; padding: 0"></button>
+    <button class="ib" aria-label="Add layer" style="width: 48px; height: 48px; background: #2a2b30"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg></button>
+    <button class="ib" aria-label="Expand layers" style="width: 48px; height: 40px"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"></path></svg></button>
+  </aside>
+
+  <div class="panel" style="position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; padding: 4px; display: flex; gap: 8px; align-items: center">
+    <div class="seg" style="border: 0; background: transparent"><button class="on">Lit</button><button>Colour</button><button>Rough</button><button>UV check</button></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":720}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
